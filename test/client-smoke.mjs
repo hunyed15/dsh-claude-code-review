@@ -6,6 +6,9 @@
  * 的 `inject` 列表，导致插件激活失败、整个 bundle 都挂掉（连 Host 工具一起消失）。
  * 这类错误用静态断言就能挡住，不必等重启才发现。
  *
+ * 当前 DSH 的官方客户端包直接往 document.head 插 <style>；`styles` builtin
+ * 在本运行时没有生效，所以样式改为原生 style 标签注入（C9）。
+ *
  * 用法：从本包目录运行 `node test/client-smoke.mjs`。
  */
 import { readFile } from 'node:fs/promises'
@@ -49,9 +52,11 @@ function check(name, condition, detail) {
   check('C8 模块 id 与包名一致', source.includes("id: '@local/claude-code-review'"), 'module id mismatch')
 }
 
-// 3. 样式 API 有存在性保护（宿主没有 styles 也不能抛）
+// 3. 样式注入：直接插原生 <style>，不依赖 styles builtin
 {
-  check('C9 样式插入用 typeof 保护', /typeof styles !== 'undefined'/.test(source), 'no typeof guard')
+  const directStyle = /document\.createElement\(['"]style['"]\)/.test(source)
+  const tagged = source.includes('dataset.pluginCss') && source.includes('document.head.appendChild')
+  check('C9 用原生 style 标签注入样式', directStyle && tagged, 'no direct style injection')
 }
 
 // 4. 读数据只走自己的 Host 路由，不直连磁盘/别的服务
