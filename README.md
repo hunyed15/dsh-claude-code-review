@@ -2,6 +2,8 @@
 
 DSH Host 插件：把「本地 Claude Code CLI 做独立只读审核」注册成原生工具 **`claude_review`**。
 
+> 本仓库是**独立插件仓库**，可以安装到任意 DSH profile；`<cwd>/tools/claude-review/**` 属于被审项目的可选引擎，不是本仓库的一部分。XinHuo 等只是被它审核过的项目。
+
 主代理（DSH）负责实现，Claude Code 负责判：独立进程、独立上下文、只读权限、拿不到主代理的推理过程。
 
 ## 它是什么 / 不是什么
@@ -44,12 +46,12 @@ plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claud
 3. `<cwd>/.dsh/claude-review/Invoke-ClaudeReview.ps1`
 4. 插件自带的 `scripts/Invoke-ClaudeReview.ps1`（跨仓库兜底，可用 `allowBundledFallback: false` 关掉）
 
-自带副本是发布时的快照；在被审仓库里始终以第 2 条为准，所以升级引擎不用重装插件。
+自带副本是发布时的快照；被审仓库有第 2/3 条引擎时始终以它为准，所以升级被审仓库的引擎不用重装插件。**本插件仓库没有 `tools/claude-review/`，默认就走第 4 条自带副本。**
 
 ## 平台与依赖
 
 - Windows + PowerShell 7（`pwsh`），通过 `ctx.subprocess` 调度，遵守 Host 的进程与沙箱约束。
-- 需要本地 `claude` CLI 已安装并可用（引擎自己解析可执行文件；可在仓库 `tools/claude-review/config.json` 里固定 `claudeExe`）。
+- 需要本地 `claude` CLI 已安装并可用（引擎自己解析可执行文件；可在本插件的 `scripts/config.json`，或被审仓库的 `tools/claude-review/config.json` 里固定 `claudeExe`）。
 - 本机沙箱下审核进程通常只有 `Read` 可用（`Grep`/`Glob`/`Bash` 被拒），引擎会把 diff 与改动文件清单内联进简报。
 
 ## 协同面板（会话内第三个 tab）
@@ -115,14 +117,15 @@ node test/client-smoke.mjs   # 11 个断言
 
 ## 改动插件代码后
 
-bundle 是**链接安装**（profile 的 `node_modules` 指向本目录），文件改动立刻在磁盘上生效，但已加载的 JavaScript 模块不会热替换：**改 `index.js` / `panel.js` 需要重启 DSH（或重新启用该插件）才生效**；`client.js` 改完刷新页面即可。只改引擎（`tools/claude-review/`）不需要重启——每次调用都重新拉起进程。
+bundle 是**链接安装**（profile 的 `node_modules` 指向本目录），文件改动立刻在磁盘上生效，但已加载的 JavaScript 模块不会热替换：**改 `index.js` / `panel.js` 需要重启 DSH（或重新启用该插件）才生效**；`client.js` 改完刷新页面即可。只改引擎（本插件仓库的 `scripts/Invoke-ClaudeReview.ps1`，或被审仓库自己的 `tools/claude-review/`）不需要重启——每次调用都重新拉起进程。
 
 ## 与 CLI / Trellis 的关系
 
 | 入口 | 用途 |
 | --- | --- |
 | `claude_review` 工具（本插件） | 会话内直接调，主代理的首选路径 |
-| `tools/claude-review/Invoke-ClaudeReview.ps1` | 脚本路径、CI、以及本插件的兜底引擎 |
-| `.trellis/spec/guides/claude-review-gate.md` | 门禁契约：什么时候跑、退出码怎么处理、发现怎么分流 |
+| 本插件 `scripts/Invoke-ClaudeReview.ps1` | 独立插件仓库里默认使用的引擎，也可用 `enginePath` 指向别处 |
+| 被审仓库的 `tools/claude-review/Invoke-ClaudeReview.ps1` | 该仓库自己的引擎；存在时优先于插件自带副本 |
+| 被审仓库的 `.trellis/spec/guides/claude-review-gate.md` | 门禁契约（如果该项目有）；本插件仓库没有它也能工作 |
 
-三者共用同一个引擎与同一份报告目录（`.trellis/tasks/<task>/review/`）。
+三者共用同一套引擎契约与报告目录（`.trellis/tasks/<task>/review/`）。

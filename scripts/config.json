@@ -1,5 +1,5 @@
 {
-  "$comment": "tools/claude-review 运行参数。修改后无需重启，脚本每次读取。",
+  "$comment": "审核引擎运行参数（插件自带副本在 scripts/ 下；被审仓库可放自己的 config.json）。修改后无需重启，脚本每次读取。",
   "claudeExe": "",
   "model": "",
   "effort": "low",
