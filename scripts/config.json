@@ -1,0 +1,26 @@
+{
+  "$comment": "tools/claude-review 运行参数。修改后无需重启，脚本每次读取。",
+  "claudeExe": "",
+  "model": "",
+  "effort": "low",
+  "timeoutSec": 1500,
+  "maxBudgetUsd": 1.5,
+  "maxDiffChars": 40000,
+  "maxRounds": 3,
+  "failOn": ["critical", "important"],
+  "reviewerRoleFile": ".trellis/agents/review.md",
+  "snapshotExcludePathspecs": [
+    ":(exclude).trellis/tasks/*/review/**"
+  ],
+  "excludePathspecs": [
+    ":(exclude).trellis/tasks/*/review/**",
+    ":(exclude).trellis/.runtime/**",
+    ":(exclude)node_modules/**",
+    ":(exclude)**/node_modules/**",
+    ":(exclude)**/target/**",
+    ":(exclude)app/.npm-cache/**",
+    ":(exclude).dsh/tmp/**",
+    ":(exclude)docs/legacy/**",
+    ":(exclude)backup/**"
+  ]
+}

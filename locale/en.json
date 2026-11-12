@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Claude Code review",
+    "description": "Runs an independent read-only review of the workspace with the local Claude Code CLI and returns graded findings plus a submit gate."
+  }
+}

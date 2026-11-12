@@ -1,0 +1,33 @@
+{
+  "name": "@local/claude-code-review",
+  "version": "1.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Independent read-only code review with the local Claude Code CLI, exposed as DSH tools plus a 协同 panel.",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./panel": "./panel.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "panel.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "scripts/Invoke-ClaudeReview.ps1",
+    "scripts/config.json",
+    "scripts/review-schema.json"
+  ],
+  "dsh": {
+    "bundle": { "patch": "./cordis.patch.yml" },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": ["@deepseek-ai/dsh-client-ui-conversation"]
+    }
+  }
+}

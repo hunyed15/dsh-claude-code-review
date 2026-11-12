@@ -1,0 +1,17 @@
+# Node / tooling
+node_modules/
+npm-debug.log*
+pnpm-debug.log*
+yarn-error.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated review artifacts (the engine excludes these from snapshots too)
+.trellis/.runtime/
+.trellis/tasks/*/review/
+
+# Local scratch
+*.local
+*.log

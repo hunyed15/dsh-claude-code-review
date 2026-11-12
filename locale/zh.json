@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Claude Code 独立审核",
+    "description": "调用本地 Claude Code CLI 对当前工作区做只读独立审核，返回分级问题与提交门禁结论。"
+  }
+}
