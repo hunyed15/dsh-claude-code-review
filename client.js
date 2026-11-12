@@ -59,6 +59,13 @@ window.__ModuleLoader__.load({
 .crc-body::-webkit-scrollbar-track { background:transparent; }
 .crc-content { max-width:1180px; margin:0 auto; }
 .crc-inline-error { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; padding:8px 12px; border:1px solid var(--crc-bad); border-radius:8px; color:var(--crc-bad); background:var(--crc-surface); font-size:12px; }
+.crc-run { display:flex; align-items:center; gap:8px; margin-bottom:14px; padding:8px 12px; border:1px solid var(--crc-border-strong); border-radius:8px; background:var(--crc-surface); font-size:12px; }
+.crc-run-dot { width:7px; height:7px; border-radius:50%; background:var(--crc-brand); flex:none; }
+.crc-run-running .crc-run-dot { animation:crc-pulse 1.2s ease-in-out infinite; }
+.crc-run-stale { border-color:var(--crc-warn); color:var(--crc-warn); }
+.crc-run-failed { border-color:var(--crc-bad); color:var(--crc-bad); }
+.crc-run-stale .crc-run-dot, .crc-run-failed .crc-run-dot { background:currentColor; }
+.crc-run-detail { margin-left:auto; color:var(--crc-muted); font-size:11.5px; }
 .crc-rail { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); border:1px solid var(--crc-border); border-radius:10px; background:var(--crc-surface); overflow:hidden; margin-bottom:26px; }
 .crc-rail-cell { padding:12px 16px; min-width:0; }
 .crc-rail-cell + .crc-rail-cell { border-left:1px solid var(--crc-border); }
@@ -97,6 +104,12 @@ window.__ModuleLoader__.load({
 .crc-chevron-sm { width:13px; height:13px; }
 .crc-round-detail { padding:0 14px 14px; border-top:1px solid var(--crc-border); }
 .crc-summary { margin:12px 0 0; font-size:12.5px; line-height:1.6; }
+.crc-advice { margin-top:10px; padding-top:10px; border-top:1px dashed var(--crc-border); color:var(--crc-muted); font-size:12px; line-height:1.6; }
+.crc-advice-block + .crc-advice-block { margin-top:6px; }
+.crc-advice b { color:var(--crc-text); font-weight:600; margin-right:6px; }
+.crc-advice ul { margin:4px 0 0; padding-left:16px; }
+.crc-advice li { margin:2px 0; }
+.crc-advice-assessment { margin:6px 0 0; }
 .crc-round-meta { display:flex; gap:14px; flex-wrap:wrap; margin-top:8px; color:var(--crc-muted); font-size:11.5px; font-variant-numeric:tabular-nums; }
 .crc-issues { list-style:none; margin:10px 0 0; padding:0; }
 .crc-issue + .crc-issue { border-top:1px solid var(--crc-border); }
@@ -129,6 +142,9 @@ window.__ModuleLoader__.load({
 .crc-side-section { padding:14px 16px; }
 .crc-side-section + .crc-side-section { border-top:1px solid var(--crc-border); }
 .crc-side-section h2 { margin:0 0 8px; font-size:12px; font-weight:600; }
+.crc-next { background:var(--crc-surface-2); }
+.crc-next-row { display:flex; align-items:center; gap:7px; }
+.crc-next-label { font-size:13px; font-weight:600; line-height:1.4; }
 .crc-gate-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:8px; }
 .crc-gate-head h2 { margin:0; }
 .crc-gate-reason { margin:0; color:var(--crc-muted); font-size:12px; line-height:1.55; }
@@ -141,9 +157,14 @@ window.__ModuleLoader__.load({
 .crc-check-no { color:var(--crc-muted); }
 .crc-manifests { display:flex; gap:14px; flex-wrap:wrap; margin-top:10px; color:var(--crc-muted); font-size:11.5px; }
 .crc-manifests b { color:var(--crc-text); font-weight:600; font-variant-numeric:tabular-nums; }
-.crc-task-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; }
-.crc-task { display:flex; align-items:center; gap:8px; min-width:0; font-size:12px; }
+.crc-task-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:4px; }
+.crc-task { min-width:0; }
+.crc-task-btn { width:100%; display:flex; align-items:center; gap:8px; padding:6px 8px; border:1px solid transparent; border-radius:7px; background:transparent; color:inherit; font:inherit; font-size:12px; text-align:left; cursor:pointer; transition:background-color .16s ease,border-color .16s ease; }
+.crc-task-btn:hover { background:var(--crc-surface-2); }
+.crc-task-btn:focus-visible { outline:2px solid var(--crc-brand); outline-offset:1px; }
+.crc-task-active { background:var(--crc-surface-2); border-color:var(--crc-border-strong); }
 .crc-task-title { flex:1 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.crc-task-pending { color:var(--crc-bad); font-size:11px; white-space:nowrap; }
 .crc-task-round { color:var(--crc-muted); font-size:11px; font-variant-numeric:tabular-nums; }
 .crc-empty-timeline { position:relative; border:1px dashed var(--crc-border-strong); border-radius:10px; background:var(--crc-surface); padding:18px 18px 18px 42px; }
 .crc-empty-node { position:absolute; left:16px; top:23px; width:11px; height:11px; border-radius:50%; background:var(--crc-surface-2); border:1px solid var(--crc-border-strong); }
@@ -237,6 +258,18 @@ window.__ModuleLoader__.load({
       completed: ['已完成', 'ok'],
       archived: ['已归档', 'idle'],
     }
+    const LIFECYCLE_META = {
+      new: ['新发现', 'brand'],
+      'still-there': ['仍存在', 'warn'],
+      fixed: ['已修复', 'ok'],
+      reopened: ['复发', 'bad'],
+      unreviewed: ['未复检', 'idle'],
+      unknown: ['—', 'idle'],
+    }
+    const STORAGE_META = {
+      trellis: ['Trellis', 'brand'],
+      local: ['本地账本', 'idle'],
+    }
 
     function meta(map, key, fallback) {
       return map[key] || [fallback || String(key || '未知'), 'idle']
@@ -269,6 +302,15 @@ window.__ModuleLoader__.load({
     function money(value) {
       const amount = Number(value)
       return Number.isFinite(amount) && amount > 0 ? `$${amount.toFixed(2)}` : ''
+    }
+
+    function elapsedLabel(value) {
+      const seconds = Number(value)
+      if (!Number.isFinite(seconds) || seconds < 0) return ''
+      if (seconds < 60) return `${Math.round(seconds)} 秒`
+      const minutes = Math.floor(seconds / 60)
+      const rest = Math.round(seconds % 60)
+      return rest > 0 ? `${minutes} 分 ${rest} 秒` : `${minutes} 分钟`
     }
 
     function modeLabel(value) {
@@ -344,6 +386,7 @@ window.__ModuleLoader__.load({
       const data = props.data || {}
       const title = active?.task?.title || '协同审核'
       const status = active?.task?.status ? meta(TASK_STATUS_META, active.task.status) : null
+      const storage = data.storage ? meta(STORAGE_META, data.storage) : null
       return h(
         'header',
         { className: 'crc-head' },
@@ -359,6 +402,7 @@ window.__ModuleLoader__.load({
               h('h1', { className: 'crc-title', title }, title),
               status ? h(Pill, { tone: status[1], title: `状态 ${active.task.status}` }, status[0]) : null,
               active?.task?.priority ? h(Pill, { tone: 'idle', title: '优先级' }, active.task.priority) : null,
+              storage ? h(Pill, { tone: storage[1], title: '审核账本' }, storage[0]) : null,
             ),
             h(
               'div',
@@ -415,6 +459,8 @@ window.__ModuleLoader__.load({
       const latestSub = latest
         ? `${modeLabel(latest.mode)}${latest.costUsd ? `，${money(latest.costUsd)}` : ''}`
         : '等待第一次审核'
+      const totalCost = Number(props.totalCostUsd) || 0
+      const totalText = totalCost > 0 ? `累计 ${money(totalCost)}` : '累计 —'
       return h(
         'section',
         { className: 'crc-rail', 'aria-label': '审核概览' },
@@ -427,7 +473,7 @@ window.__ModuleLoader__.load({
         h(RailCell, {
           label: '审核轮次',
           value: String(rounds.length),
-          sub: latest ? `最近 #${latest.round}` : '等待第一次审核',
+          sub: latest ? `最近 #${latest.round}，${totalText}` : '等待第一次审核',
         }),
         h(RailCell, {
           label: '待修问题',
@@ -474,6 +520,21 @@ window.__ModuleLoader__.load({
       const [open, setOpen] = React.useState(false)
       const severity = meta(SEVERITY_META, issue.severity, '次要')
       const disposition = issue.disposition ? meta(DISPOSITION_META, issue.disposition.status) : null
+      const lifecycle = issue.lifecycle ? meta(LIFECYCLE_META, issue.lifecycle.state) : null
+      const hasLifecycle = lifecycle && lifecycle[0] !== '—'
+      const recorded = disposition && issue.disposition?.source === 'recorded' ? disposition : null
+      const cycle = issue.lifecycle
+      const cycleText =
+        cycle && cycle.state !== 'unknown'
+          ? `${meta(LIFECYCLE_META, cycle.state)[0]}（首次 #${cycle.firstRound}，最近 #${cycle.lastRound}${
+              cycle.seen > 1 ? `，共 ${cycle.seen} 轮` : ''
+            }）`
+          : ''
+      const dispositionText = disposition
+        ? `${disposition[0]}${issue.disposition?.source === 'recorded' ? '（记录）' : '（推断）'}${
+            issue.disposition?.note ? `：${issue.disposition.note}` : ''
+          }`
+        : ''
       return h(
         'li',
         { className: 'crc-issue' },
@@ -488,8 +549,10 @@ window.__ModuleLoader__.load({
           h('span', { className: `crc-sev crc-sev-${severity[1]}` }, severity[0]),
           h('span', { className: 'crc-loc', title: issue.file }, `${issue.file || '—'}${issue.line ? `:${issue.line}` : ''}`),
           h('span', { className: 'crc-issue-text' }, issue.issue || '(无描述)'),
-          disposition
-            ? h(Pill, { tone: disposition[1], title: issue.disposition?.note || disposition[0] }, disposition[0])
+          hasLifecycle ? h(Pill, { tone: lifecycle[1], title: cycleText || lifecycle[0] }, lifecycle[0]) : null,
+          recorded ? h(Pill, { tone: recorded[1], title: dispositionText }, recorded[0]) : null,
+          !hasLifecycle && !recorded && disposition
+            ? h(Pill, { tone: disposition[1], title: dispositionText }, disposition[0])
             : null,
           h(ChevronIcon, { className: 'crc-chevron crc-chevron-sm' }),
         ),
@@ -497,12 +560,47 @@ window.__ModuleLoader__.load({
           ? h(
               'div',
               { className: 'crc-issue-detail' },
+              cycleText ? h('p', null, h('b', null, '生命周期'), cycleText) : null,
+              dispositionText ? h('p', null, h('b', null, '处置'), dispositionText) : null,
               issue.why ? h('p', null, h('b', null, '后果'), issue.why) : null,
               issue.fix ? h('p', null, h('b', null, '方向'), issue.fix) : null,
-              issue.disposition?.note ? h('p', null, h('b', null, '处置'), issue.disposition.note) : null,
               issue.key ? h('p', { className: 'crc-key' }, h('b', null, 'key'), h('span', { className: 'crc-code' }, issue.key)) : null,
             )
           : null,
+      )
+    }
+
+    function RoundAdvice(props) {
+      const round = props.round
+      const strengths = Array.isArray(round.strengths) ? round.strengths : []
+      const recommendations = Array.isArray(round.recommendations) ? round.recommendations : []
+      if (strengths.length === 0 && recommendations.length === 0 && !round.assessment) return null
+      return h(
+        'div',
+        { className: 'crc-advice' },
+        strengths.length > 0
+          ? h(
+              'div',
+              { className: 'crc-advice-block' },
+              h('b', null, '做得好'),
+              h(
+                'ul',
+                null,
+                strengths.map((item) =>
+                  h('li', { key: `${item.point}|${item.evidence}` }, `${item.point}${item.evidence ? `（${item.evidence}）` : ''}`),
+                ),
+              ),
+            )
+          : null,
+        recommendations.length > 0
+          ? h(
+              'div',
+              { className: 'crc-advice-block' },
+              h('b', null, '建议'),
+              h('ul', null, recommendations.map((item) => h('li', { key: item }, item))),
+            )
+          : null,
+        round.assessment ? h('p', { className: 'crc-advice-assessment' }, h('b', null, '判断'), round.assessment) : null,
       )
     }
 
@@ -553,6 +651,7 @@ window.__ModuleLoader__.load({
                   h('span', null, `会话 ${shortId(round.sessionId)}`),
                   round.costUsd ? h('span', null, `成本 ${money(round.costUsd)}`) : null,
                 ),
+                h(RoundAdvice, { round }),
                 issues.length === 0
                   ? h('p', { className: 'crc-note' }, '本轮没有条目化问题。')
                   : h(
@@ -606,15 +705,55 @@ window.__ModuleLoader__.load({
       const gate = active?.gate || { state: 'unknown', reason: '还没有审核记录' }
       const gateMeta = meta(GATE_META, gate.state)
       const tasks = Array.isArray(data.tasks) ? data.tasks : []
-      const activeName = active?.task?.dir ? String(active.task.dir).split(/[\\/]/).filter(Boolean).pop() : ''
-      const others = tasks.filter((task) => task.name !== activeName)
-      const shownOthers = others.slice(0, 6)
+      const activeName = active?.task?.name || ''
+      const next = active?.nextAction || null
+      const totalCost = Number(active?.totalCostUsd) || 0
+      const totalText = totalCost > 0 ? money(totalCost) : '$0.00'
+      const taskRow = (task) => {
+        const isActive = task.name === activeName
+        const taskGate = meta(GATE_META, task.gate?.state)
+        return h(
+          'li',
+          { className: 'crc-task', key: task.name },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: cx('crc-task-btn', isActive && 'crc-task-active'),
+              'aria-current': isActive ? 'true' : 'false',
+              title: task.title || task.name,
+              onClick: () => {
+                if (props.onSelectTask) props.onSelectTask(task.name)
+              },
+            },
+            h('span', { className: 'crc-task-title' }, task.title || task.name),
+            h(Pill, { tone: taskGate[1], title: `门禁 ${taskGate[0]}` }, taskGate[0]),
+            task.pending > 0 ? h('span', { className: 'crc-task-pending' }, `${task.pending} 待修`) : null,
+            task.lastRound ? h('span', { className: 'crc-task-round' }, `#${task.lastRound}`) : null,
+          ),
+        )
+      }
+
       return h(
         'aside',
         { className: 'crc-aside' },
         h(
           'div',
           { className: 'crc-side-card' },
+          next
+            ? h(
+                'section',
+                { className: 'crc-side-section crc-next' },
+                h('h2', null, '下一步'),
+                h(
+                  'div',
+                  { className: 'crc-next-row' },
+                  h('span', { className: `crc-dot crc-dot-${next.tone || 'idle'}` }),
+                  h('strong', { className: 'crc-next-label' }, next.label || '继续'),
+                ),
+                next.detail ? h('p', { className: 'crc-note' }, next.detail) : null,
+              )
+            : null,
           h(
             'section',
             { className: 'crc-side-section' },
@@ -626,50 +765,46 @@ window.__ModuleLoader__.load({
             ),
             h('p', { className: 'crc-gate-reason' }, gate.reason || '还没有审核记录'),
           ),
-          h(
-            'section',
-            { className: 'crc-side-section' },
-            h('h2', null, 'Trellis 进度'),
-            h(
-              'div',
-              { className: 'crc-check-list' },
-              h(CheckRow, { label: 'prd.md', ok: active?.artifacts?.prd }),
-              h(CheckRow, { label: 'design.md', ok: active?.artifacts?.design }),
-              h(CheckRow, { label: 'implement.md', ok: active?.artifacts?.implement }),
-            ),
-            h(
-              'div',
-              { className: 'crc-manifests' },
-              h('span', null, 'check.jsonl ', h('b', null, active?.manifests?.check ?? 0)),
-              h('span', null, 'implement.jsonl ', h('b', null, active?.manifests?.implement ?? 0)),
-            ),
-          ),
-          h(
-            'section',
-            { className: 'crc-side-section' },
-            h('h2', null, '其它任务'),
-            others.length === 0
-              ? h('p', { className: 'crc-note' }, '没有其它任务。')
-              : h(
-                  'ul',
-                  { className: 'crc-task-list' },
-                  shownOthers.map((task) =>
-                    h(
-                      'li',
-                      { className: 'crc-task', key: task.name },
-                      h('span', { className: 'crc-task-title', title: task.title || task.name }, task.title || task.name),
-                      h(
-                        Pill,
-                        { tone: meta(TASK_STATUS_META, task.status, '待开始')[1] },
-                        meta(TASK_STATUS_META, task.status, '待开始')[0],
-                      ),
-                      task.lastRound ? h('span', { className: 'crc-task-round' }, `#${task.lastRound}`) : null,
-                    ),
-                  ),
-                  others.length > shownOthers.length
-                    ? h('p', { className: 'crc-note' }, `另有 ${others.length - shownOthers.length} 个任务。`)
-                    : null,
+          data.storage === 'trellis'
+            ? h(
+                'section',
+                { className: 'crc-side-section' },
+                h('h2', null, 'Trellis 进度'),
+                h(
+                  'div',
+                  { className: 'crc-check-list' },
+                  h(CheckRow, { label: 'prd.md', ok: active?.artifacts?.prd }),
+                  h(CheckRow, { label: 'design.md', ok: active?.artifacts?.design }),
+                  h(CheckRow, { label: 'implement.md', ok: active?.artifacts?.implement }),
                 ),
+                h(
+                  'div',
+                  { className: 'crc-manifests' },
+                  h('span', null, 'check.jsonl ', h('b', null, active?.manifests?.check ?? 0)),
+                  h('span', null, 'implement.jsonl ', h('b', null, active?.manifests?.implement ?? 0)),
+                  h('span', null, '累计 ', h('b', null, totalText)),
+                ),
+              )
+            : h(
+                'section',
+                { className: 'crc-side-section' },
+                h('h2', null, '本地账本'),
+                h('p', { className: 'crc-note' }, '存储：', h('span', { className: 'crc-code' }, '.dsh/claude-review/ledger')),
+                h(
+                  'div',
+                  { className: 'crc-manifests' },
+                  h('span', null, '轮次 ', h('b', null, (active?.rounds || []).length)),
+                  h('span', null, '累计 ', h('b', null, totalText)),
+                ),
+                h('p', { className: 'crc-note' }, '没有 .trellis，不依赖 Trellis；上下文来自 Description 与实际改动。'),
+              ),
+          h(
+            'section',
+            { className: 'crc-side-section' },
+            h('h2', null, '项目任务'),
+            tasks.length === 0
+              ? h('p', { className: 'crc-note' }, '还没有任务。')
+              : h('ul', { className: 'crc-task-list' }, tasks.map(taskRow)),
           ),
         ),
       )
@@ -759,7 +894,7 @@ window.__ModuleLoader__.load({
       )
     }
 
-    function usePanel(sessionId) {
+    function usePanel(sessionId, task) {
       const [state, setState] = React.useState({
         loading: sessionId !== '',
         data: null,
@@ -776,7 +911,9 @@ window.__ModuleLoader__.load({
         const requestId = ++sequence.current
         setState((previous) => ({ ...previous, loading: true }))
         try {
-          const response = await fetch(`/claude-review/api/panel?sessionId=${encodeURIComponent(sessionId)}`, {
+          const params = new URLSearchParams({ sessionId })
+          if (task) params.set('task', task)
+          const response = await fetch(`/claude-review/api/panel?${params.toString()}`, {
             headers: { accept: 'application/json' },
           })
           const payload = await response.json()
@@ -795,7 +932,7 @@ window.__ModuleLoader__.load({
             error: String((error && error.message) || error),
           }))
         }
-      }, [sessionId])
+      }, [sessionId, task])
 
       React.useEffect(() => {
         let alive = true
@@ -822,7 +959,8 @@ window.__ModuleLoader__.load({
 
     function CollabView(props) {
       const sessionId = props && props.sessionId ? String(props.sessionId) : ''
-      const { loading, data, error, at, reload } = usePanel(sessionId)
+      const [selectedTask, setSelectedTask] = React.useState('')
+      const { loading, data, error, at, reload } = usePanel(sessionId, selectedTask)
 
       if (!sessionId) {
         return h(StateShell, {
@@ -835,15 +973,23 @@ window.__ModuleLoader__.load({
       if (error === 'session-not-resolved') {
         return h(StateShell, {
           title: '无法解析当前会话的项目',
-          body: '面板只显示会话自己项目的数据。确认这个会话在一个 Trellis 项目里打开，然后重试。',
+          body: '面板只显示会话自己项目的数据。确认这个会话在一个项目目录里打开，然后重试。',
           onRetry: reload,
           loading,
         })
       }
-      if (error === 'no-trellis') {
+      if (error === 'trellis-not-initialized') {
         return h(StateShell, {
-          title: '这里还不是 Trellis 项目',
-          body: '面板只读取项目根目录下的 .trellis/。在项目里初始化 Trellis 后，点重试。',
+          title: 'Trellis 未初始化',
+          body: '当前配置是 storage=trellis，但这个项目没有 .trellis。改用 local/auto，或先初始化 Trellis。',
+          onRetry: reload,
+          loading,
+        })
+      }
+      if (error === 'cwd-not-found') {
+        return h(StateShell, {
+          title: '项目目录不存在',
+          body: '当前会话的工作目录不存在或已移动。回到一个存在的项目里再打开面板。',
           onRetry: reload,
           loading,
         })
@@ -861,6 +1007,22 @@ window.__ModuleLoader__.load({
       const active = data.active || null
       const rounds = Array.isArray(active?.rounds) ? active.rounds : []
       const latest = rounds.length ? [...rounds].sort((a, b) => b.round - a.round)[0] : null
+      const run = active?.run || null
+      const runClass = run ? (run.stale ? 'stale' : run.status) : ''
+      const runTitle = run
+        ? run.status === 'failed'
+          ? '上次审核失败'
+          : run.stale
+            ? '上次审核中断'
+            : '审核进行中'
+        : ''
+      const runDetail = run
+        ? run.status === 'failed'
+          ? run.error
+          : run.stale
+            ? '心跳已停止，可能进程崩溃或被取消。'
+            : `已 ${elapsedLabel(run.elapsedSec)}`
+        : ''
 
       return h(
         'div',
@@ -880,12 +1042,21 @@ window.__ModuleLoader__.load({
                   h('button', { type: 'button', className: 'crc-btn', onClick: reload }, '重试'),
                 )
               : null,
-            h(StatusRail, { active, rounds, latest }),
+            run
+              ? h(
+                  'div',
+                  { className: `crc-run crc-run-${runClass}`, role: 'status' },
+                  h('span', { className: 'crc-run-dot', 'aria-hidden': 'true' }),
+                  h('strong', null, runTitle),
+                  runDetail ? h('span', { className: 'crc-run-detail' }, runDetail) : null,
+                )
+              : null,
+            h(StatusRail, { active, rounds, latest, totalCostUsd: active?.totalCostUsd || 0 }),
             h(
               'div',
               { className: 'crc-grid' },
               h(Timeline, { active, rounds }),
-              h(Aside, { active, data }),
+              h(Aside, { active, data, onSelectTask: setSelectedTask }),
             ),
             h(
               'p',

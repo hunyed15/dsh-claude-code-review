@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { appendDispositions, loadPanel, matchFollowUp, textSimilarity } from '../panel.js'
+import { appendDispositions, deriveNextAction, loadPanel, matchFollowUp, textSimilarity } from '../panel.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_DIR = dirname(HERE)
@@ -128,13 +128,153 @@ function check(name, condition, detail) {
   }
   check('C3 非法 status 被拒', rejected.includes('status 必须是'), rejected)
 
-  const none = await loadPanel(join(root, 'not-a-project'))
-  check('D1 无 .trellis → null', none === null)
+  const missing = await loadPanel(join(root, 'not-a-project'))
+  check('D1 不存在的项目 → cwd-not-found', missing?.ok === false && missing.error === 'cwd-not-found', JSON.stringify(missing))
 
   await rm(root, { recursive: true, force: true })
 }
 
-// E. 后续“干净 pass”也算复检；nothing-to-review 不算
+// D. 本地账本：没有 .trellis 也能看板，不要求 Trellis
+{
+  const plain = await mkdtemp(join(tmpdir(), 'crc-plain-'))
+  const emptyPanel = await loadPanel(plain)
+  check('D2 无 .trellis → 本地空账本', emptyPanel?.ok === true && emptyPanel.storage === 'local')
+  check('D3 本地空账本有活动任务', emptyPanel?.active?.rounds?.length === 0 && emptyPanel.active.task.name === 'local')
+  await rm(plain, { recursive: true, force: true })
+
+  const root = await mkdtemp(join(tmpdir(), 'crc-local-panel-'))
+  const taskDir = join(root, '.dsh', 'claude-review', 'ledger')
+  const reviewDir = join(taskDir, 'review')
+  await mkdir(reviewDir, { recursive: true })
+  await writeFile(join(taskDir, 'task.json'), JSON.stringify({ id: 'local', name: 'local', title: '本地项目', status: 'in_progress' }))
+  await writeFile(
+    join(reviewDir, 'history.jsonl'),
+    JSON.stringify({ at: '2026-11-12T10:00:00', round: 1, mode: 'full', verdict: 'pass', critical: 0, important: 0, minor: 0, files: 1, cost_usd: 0.2 }) + '\n',
+  )
+  await writeFile(
+    join(reviewDir, 'review-1.json'),
+    JSON.stringify({
+      meta: {},
+      review: {
+        verdict: 'pass',
+        summary: 'ok',
+        issues: [],
+        strengths: [{ point: '做得稳', evidence: 'x.js:1' }],
+        recommendations: ['补一个边界测试'],
+        assessment: '结构清晰',
+      },
+    }),
+  )
+  const panel = await loadPanel(root)
+  check('D4 本地账本 storage=local', panel?.ok === true && panel.storage === 'local')
+  check('D5 本地任务标题', panel?.active?.task?.title === '本地项目', panel?.active?.task?.title)
+  check('D6 本地轮次可读', panel?.active?.rounds?.length === 1)
+  check('D7 strengths/recommendations 可读', panel?.active?.rounds?.[0]?.strengths?.[0]?.point === '做得稳')
+  check('D8 本地成本累计', panel?.active?.totalCostUsd === 0.2)
+  check('D9 full pass → 下一步 gate', panel?.active?.nextAction?.key === 'gate')
+
+  const runPath = join(reviewDir, 'run.json')
+  const now = new Date()
+  const running = {
+    status: 'running',
+    phase: 'reviewing',
+    storage: 'local',
+    mode: 'full',
+    round: 1,
+    task: 'local',
+    startedAt: new Date(now.getTime() - 5000).toISOString(),
+    updatedAt: now.toISOString(),
+  }
+  await writeFile(runPath, JSON.stringify(running))
+  let runningPanel = await loadPanel(root)
+  check('D10 运行中可读', runningPanel?.active?.run?.status === 'running' && runningPanel.active.run.stale === false)
+  await writeFile(runPath, JSON.stringify({ ...running, updatedAt: new Date(now.getTime() - 300000).toISOString() }))
+  runningPanel = await loadPanel(root)
+  check('D11 心跳超时 → stale', runningPanel?.active?.run?.stale === true)
+  await writeFile(runPath, JSON.stringify({ status: 'failed', phase: 'failed', error: 'timeout', updatedAt: now.toISOString() }))
+  runningPanel = await loadPanel(root)
+  check('D12 失败状态可读', runningPanel?.active?.run?.status === 'failed' && runningPanel.active.run.error === 'timeout')
+  await writeFile(runPath, JSON.stringify({ status: 'done', updatedAt: now.toISOString() }))
+  runningPanel = await loadPanel(root)
+  check('D13 完成态不显示运行条', runningPanel?.active?.run === null)
+  await rm(root, { recursive: true, force: true })
+}
+
+// E. 问题生命周期：new / still-there / fixed / reopened
+{
+  const root = await mkdtemp(join(tmpdir(), 'crc-life-'))
+  const taskDir = join(root, '.trellis', 'tasks', 'lifecycle')
+  const reviewDir = join(taskDir, 'review')
+  await mkdir(reviewDir, { recursive: true })
+  await writeFile(join(taskDir, 'task.json'), JSON.stringify({ name: 'lifecycle', title: '生命周期', status: 'in_progress' }))
+  const issue = (key, text) => ({ key, severity: 'important', file: 'a.js', line: '1', issue: text, why: 'x', fix: 'y' })
+  await writeFile(
+    join(reviewDir, 'history.jsonl'),
+    [
+      JSON.stringify({ at: '2026-11-12T10:00:00', round: 1, mode: 'full', verdict: 'fix', critical: 0, important: 3, minor: 0, files: 1 }),
+      JSON.stringify({ at: '2026-11-12T10:10:00', round: 2, mode: 'full', verdict: 'pass', critical: 0, important: 0, minor: 0, files: 1 }),
+      JSON.stringify({ at: '2026-11-12T10:20:00', round: 3, mode: 'full', verdict: 'pass', critical: 0, important: 0, minor: 0, files: 1 }),
+    ].join('\n') + '\n',
+  )
+  await writeFile(join(reviewDir, 'review-1.json'), JSON.stringify({ meta: {}, review: { verdict: 'fix', summary: 'x', issues: [issue('a', 'A'), issue('b', 'B'), issue('c', 'C')] } }))
+  await writeFile(join(reviewDir, 'review-2.json'), JSON.stringify({ meta: {}, review: { verdict: 'pass', summary: 'y', issues: [issue('a', 'A')] } }))
+  await writeFile(join(reviewDir, 'review-3.json'), JSON.stringify({ meta: {}, review: { verdict: 'pass', summary: 'z', issues: [issue('a', 'A'), issue('b', 'B')] } }))
+
+  const panel = await loadPanel(root)
+  const round = (n) => panel.active.rounds.find((item) => item.round === n)
+  const lifecycle = (n, key) => round(n).issues.find((item) => item.key === key)?.lifecycle?.state
+  check('E1 首轮发现 → new', lifecycle(1, 'a') === 'new' && lifecycle(1, 'b') === 'new')
+  check('E2 后续仍存在 → still-there', lifecycle(2, 'a') === 'still-there')
+  check('E3 后续消失 → fixed', lifecycle(1, 'c') === 'fixed', lifecycle(1, 'c'))
+  check('E4 消失后复发 → reopened', lifecycle(3, 'b') === 'reopened', lifecycle(3, 'b'))
+  await rm(root, { recursive: true, force: true })
+}
+
+// F. 任务切换：loadPanel({ task }) 选中指定任务
+{
+  const root = await mkdtemp(join(tmpdir(), 'crc-switch-'))
+  for (const name of ['alpha', 'beta']) {
+    const taskDir = join(root, '.trellis', 'tasks', name)
+    const reviewDir = join(taskDir, 'review')
+    await mkdir(reviewDir, { recursive: true })
+    await writeFile(join(taskDir, 'task.json'), JSON.stringify({ name, title: `任务 ${name}`, status: 'in_progress' }))
+    await writeFile(join(reviewDir, 'history.jsonl'), JSON.stringify({ at: '2026-11-12T10:00:00', round: 1, mode: 'full', verdict: 'pass', critical: 0, important: 0, minor: 0, files: 1 }) + '\n')
+    await writeFile(join(reviewDir, 'review-1.json'), JSON.stringify({ meta: {}, review: { verdict: 'pass', summary: name, issues: [] } }))
+  }
+  const panel = await loadPanel(root, { task: 'beta' })
+  check('F1 指定 task 被选中', panel?.active?.task?.name === 'beta', panel?.active?.task?.name)
+  check('F2 任务列表包含两个任务', panel?.tasks?.length === 2)
+  await rm(root, { recursive: true, force: true })
+}
+
+// G. nextAction 推导
+{
+  check('G1 无轮次 → review', deriveNextAction({ rounds: [], gate: { state: 'unknown' } }).key === 'review')
+  check(
+    'G2 最近 fix → fix',
+    deriveNextAction({ rounds: [{ round: 1, verdict: 'fix', mode: 'full', counts: { critical: 1, important: 1 } }], gate: { state: 'blocked' } }).key === 'fix',
+  )
+  check(
+    'G3 incremental pass → full',
+    deriveNextAction({ rounds: [{ round: 1, verdict: 'pass', mode: 'incremental', counts: {} }], gate: { state: 'blocked' } }).key === 'full',
+  )
+  check(
+    'G4 full pass + gate pass → gate',
+    deriveNextAction({ rounds: [{ round: 1, verdict: 'pass', mode: 'full', counts: {} }], gate: { state: 'pass' } }).key === 'gate',
+  )
+  check(
+    'G5 full nothing-to-review + gate pass → gate',
+    deriveNextAction({ rounds: [{ round: 1, verdict: 'nothing-to-review', mode: 'full', counts: {} }], gate: { state: 'pass' } }).key ===
+      'gate',
+  )
+  check(
+    'G6 incremental nothing-to-review → full',
+    deriveNextAction({ rounds: [{ round: 1, verdict: 'nothing-to-review', mode: 'incremental', counts: {} }], gate: { state: 'blocked' } })
+      .key === 'full',
+  )
+}
+
+// H. 后续“干净 pass”也算复检；nothing-to-review 不算
 {
   const root = await mkdtemp(join(tmpdir(), 'crc-clean-'))
   const taskDir = join(root, '.trellis', 'tasks', 'clean')
@@ -155,14 +295,14 @@ function check(name, condition, detail) {
 
   const panel = await loadPanel(root)
   const first = panel.active.rounds.find((round) => round.round === 1)
-  check('E1 后续干净 pass → gone', first?.issues?.[0]?.disposition?.status === 'gone', JSON.stringify(first?.issues?.[0]?.disposition))
+  check('H1 后续干净 pass → gone', first?.issues?.[0]?.disposition?.status === 'gone', JSON.stringify(first?.issues?.[0]?.disposition))
   check(
-    'E2 用第 3 轮（full）复检，跳过 nothing-to-review',
+    'H2 用第 3 轮（full）复检，跳过 nothing-to-review',
     String(first?.issues?.[0]?.disposition?.note).includes('第 3 轮') &&
       String(first?.issues?.[0]?.disposition?.note).includes('full'),
     String(first?.issues?.[0]?.disposition?.note),
   )
-  check('E3 nothing-to-review 轮次没有问题', (panel.active.rounds.find((round) => round.round === 2)?.issues?.length ?? -1) === 0)
+  check('H3 nothing-to-review 轮次没有问题', (panel.active.rounds.find((round) => round.round === 2)?.issues?.length ?? -1) === 0)
   await rm(root, { recursive: true, force: true })
 
   // 只有 nothing-to-review 时，没人复检过，不能推断为已修
@@ -181,19 +321,20 @@ function check(name, condition, detail) {
   await writeFile(join(reviewDir2, 'review-1.json'), JSON.stringify({ meta: {}, review: { verdict: 'fix', summary: 'x', issues: [issue] } }))
   const panel2 = await loadPanel(root2)
   const still = panel2.active.rounds.find((round) => round.round === 1)
-  check('E4 只有 nothing-to-review → unreviewed', still?.issues?.[0]?.disposition?.status === 'unreviewed', JSON.stringify(still?.issues?.[0]?.disposition))
+  check('H4 只有 nothing-to-review → unreviewed', still?.issues?.[0]?.disposition?.status === 'unreviewed', JSON.stringify(still?.issues?.[0]?.disposition))
+  check('H5 只有 nothing-to-review → lifecycle unreviewed', still?.issues?.[0]?.lifecycle?.state === 'unreviewed', JSON.stringify(still?.issues?.[0]?.lifecycle))
   await rm(root2, { recursive: true, force: true })
 }
 
-// F. 真实仓库（有 .trellis）应能读出任务；包不在 Trellis 仓库内时跳过
+// I. 真实仓库（有 .trellis）应能读出任务；包不在 Trellis 仓库内时跳过
 {
   const realRepo = process.env.CLAUDE_REVIEW_REPO || REPO
   if (!(await exists(join(realRepo, '.trellis')))) {
-    console.log(`SKIP  F1/F2 真实仓库（${realRepo} 下没有 .trellis；可用 CLAUDE_REVIEW_REPO 指定）`)
+    console.log(`SKIP  I1/I2 真实仓库（${realRepo} 下没有 .trellis；可用 CLAUDE_REVIEW_REPO 指定）`)
   } else {
     const panel = await loadPanel(realRepo)
-    check('F1 真实仓库可读', panel?.ok === true && Array.isArray(panel.tasks))
-    check('F2 有活动任务或至少有任务列表', Boolean(panel) && (panel.active !== null || panel.tasks.length > 0))
+    check('I1 真实仓库可读', panel?.ok === true && Array.isArray(panel.tasks))
+    check('I2 有活动任务或至少有任务列表', Boolean(panel) && (panel.active !== null || panel.tasks.length > 0))
   }
 }
 

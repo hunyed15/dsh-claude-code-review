@@ -113,6 +113,20 @@ function initGitRepo(dir) {
   return result.status === 0
 }
 
+async function makeLocalProject(prefix) {
+  const root = await mkdtemp(join(tmpdir(), prefix))
+  const ledger = join(root, '.dsh', 'claude-review', 'ledger')
+  const review = join(ledger, 'review')
+  await mkdir(review, { recursive: true })
+  await writeFile(join(ledger, 'task.json'), JSON.stringify({ id: 'local', name: 'local', title: '本地项目', status: 'in_progress' }))
+  await writeFile(
+    join(review, 'history.jsonl'),
+    JSON.stringify({ at: '2026-11-12T10:00:00', round: 1, mode: 'full', verdict: 'pass', critical: 0, important: 0, minor: 0, files: 1 }) + '\n',
+  )
+  await writeFile(join(review, 'review-1.json'), JSON.stringify({ meta: {}, review: { verdict: 'pass', summary: 'ok', issues: [] } }))
+  return root
+}
+
 function makeCtx(spawnImpl, pluginConfig = {}, services = {}) {
   const tools = new Map()
   const ctx = {
@@ -158,6 +172,7 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
   check('A5 值被单引号包裹', line.includes("'gate'") && line.includes("'带 中文 的描述'"))
   check('A6 SessionId 透传', line.includes("-SessionId 'session-abc'"), line.slice(0, 240))
   check("A7 多个 checks 合并成一个数组实参", line.includes("-Checks 'a b','第二项'"), line.slice(0, 260))
+  check('A8 Storage 透传', line.includes("-Storage 'auto'"), line.slice(0, 260))
 }
 
 // B. verdict=fix 必须 ok=false
@@ -257,6 +272,19 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
   await rm(root, { recursive: true, force: true })
 }
 
+// O. 本地账本处置：没有 .trellis 时写到 .dsh/claude-review/ledger
+{
+  const root = await makeLocalProject('crc-local-disposition-')
+  const tools = makeCtx(cannedSpawn('{}', 0))
+  const tool = tools.get('claude_review_disposition')
+  const result = await tool.execute({ cwd: root, round: 1, key: 'aaa', status: 'fixed', note: '本地处置' }, exec('session-local'))
+  check('O1 本地处置写入', result.ok === true && result.written === 1, JSON.stringify(result))
+  check('O2 本地账本路径', result.taskDir === join(root, '.dsh', 'claude-review', 'ledger'), result.taskDir)
+  const rows = (await readFile(join(root, '.dsh', 'claude-review', 'ledger', 'review', 'dispositions.jsonl'), 'utf8')).trim().split('\n')
+  check('O3 本地处置落盘', rows.length === 1 && JSON.parse(rows[0]).key === 'aaa')
+  await rm(root, { recursive: true, force: true })
+}
+
 // H. 可选：真实 spawn（沙箱内 EPERM 记 SKIP）；用临时 git 仓库，不依赖包所在布局
 {
   const root = await mkdtemp(join(tmpdir(), 'crc-real-'))
@@ -313,6 +341,10 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
   check('I2b 显式开启回退时才用 defaultDirectory', optedIn === root, optedIn)
   const empty = await resolveCwdForSession({ get: () => undefined }, 'session-xyz')
   check('I3 什么服务都没有时返回空串', empty === '', empty)
+  const plain = await mkdtemp(join(tmpdir(), 'crc-local-cwd-'))
+  const local = await resolveCwdForSession(ctxWith({ get: () => plain, defaultDirectory: '' }), 'session-xyz')
+  check('I4 无 .trellis 的普通目录按本地项目解析', local === plain, local)
+  await rm(plain, { recursive: true, force: true })
   await rm(root, { recursive: true, force: true })
 }
 
@@ -355,6 +387,30 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
 
   const unknownSession = await captured.resource(new Request('http://127.0.0.1/claude-review/api/panel?sessionId=session-unknown'))
   check('J6 无效 sessionId 拒绝且不回落默认项目', unknownSession.status === 404, String(unknownSession.status))
+
+  const localProject = await makeLocalProject('crc-local-route-')
+  let localCaptured = null
+  const localServices = {
+    webServer: {
+      register(route) {
+        localCaptured = route
+        return () => {}
+      },
+    },
+    agents: { get: (id) => (id === 'session-panel' ? agent : undefined), list: () => [agent] },
+    workingDirectory: { get: () => localProject, defaultDirectory: localProject },
+  }
+  makeCtx(cannedSpawn('{}', 0), {}, localServices)
+  const localResponse = await localCaptured.resource(
+    new Request('http://127.0.0.1/claude-review/api/panel?sessionId=session-panel'),
+  )
+  const localBody = await localResponse.json().catch(() => null)
+  check(
+    'J7 本地模式路由',
+    localResponse.status === 200 && localBody?.storage === 'local' && localBody?.active?.task?.title === '本地项目',
+    JSON.stringify(localBody).slice(0, 200),
+  )
+  await rm(localProject, { recursive: true, force: true })
   await rm(project, { recursive: true, force: true })
 }
 // K. 冷启动竞态：webServer 晚到，靠有限重试补上（不依赖任何动态注入 API）

@@ -5,6 +5,9 @@
         # 审核引擎：留空自动探测 <cwd>/tools/claude-review/Invoke-ClaudeReview.ps1，
         # 找不到时使用插件自带的 scripts/Invoke-ClaudeReview.ps1
         enginePath: ''
+        # 审核账本：auto = 有 .trellis 用 Trellis，否则用 .dsh/claude-review/ledger；
+        # trellis 要求仓库已初始化 Trellis；local 绝不会创建 .trellis。
+        storage: auto
         # 单次审核超时（秒），会作为 -TimeoutSec 传给引擎，并决定工具级超时（引擎超时 + 120s 余量）。
         timeoutSec: 1500
         # 是否允许在别的仓库里回退到插件自带的引擎副本

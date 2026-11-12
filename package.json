@@ -20,7 +20,8 @@
     "icon.svg",
     "scripts/Invoke-ClaudeReview.ps1",
     "scripts/config.json",
-    "scripts/review-schema.json"
+    "scripts/review-schema.json",
+    "scripts/reviewer-role.md"
   ],
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },

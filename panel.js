@@ -1,28 +1,41 @@
 /**
  * Host-side projection for the 协同 panel.
  *
- * Everything here is read-only over the project's `.trellis/` tree, except
- * `appendDispositions()`, which appends one JSON line per call (方案 A: 处置记录).
+ * Read-only over the project's review ledger, except `appendDispositions()`,
+ * which appends one JSON line per call (方案 A: 处置记录).
+ *
+ * The ledger lives in one of two stores:
+ *   - Trellis: `<project>/.trellis/tasks/<task>/review/`
+ *   - Local:   `<project>/.dsh/claude-review/ledger/` (one ledger per repo)
  *
  * The panel never recomputes review logic: it joins the artifacts the review
  * engine already wrote (`review-N.json`, `history.jsonl`) with the dispositions
- * the main session recorded, and derives a per-finding status in three layers:
- *   1. explicit disposition (recorded)
- *   2. next reviewed round no longer reports it → "视为已修（推断）"
- *      （下一轮必须有 review-N.json 且不是 nothing-to-review；干净 pass 也算复检）
- *   3. next reviewed round still reports it      → "复检仍存在"
- *   4. no next reviewed round                    → "未复检"
+ * the main session recorded, and derives:
+ *   - disposition: explicit record > next-round inference (as before)
+ *   - lifecycle:   new / still-there / fixed / reopened / unreviewed, by key
+ *   - nextAction:  the single next thing to do for the active task
  */
 import { appendFile, mkdir, readFile, readdir, stat } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
 
 const TASK_SKIP = new Set(['archive', '_adhoc', '_gatetest'])
 const DISPOSITION_STATUSES = new Set(['fixed', 'counter-evidence', 'deferred'])
+const STORAGE_MODES = new Set(['auto', 'trellis', 'local'])
+export const LOCAL_LEDGER = join('.dsh', 'claude-review', 'ledger')
 
 async function exists(path) {
   try {
     await stat(path)
     return true
+  } catch {
+    return false
+  }
+}
+
+async function isDirectory(path) {
+  try {
+    const info = await stat(path)
+    return info.isDirectory()
   } catch {
     return false
   }
@@ -66,12 +79,6 @@ function normalizeText(value) {
     .replace(/[\s]+/g, ' ')
     .replace(/[，。；：、,.;:!?！？"'`()[\]{}<>《》]/g, '')
     .trim()
-}
-
-function tokens(value) {
-  const norm = normalizeText(value)
-  if (norm === '') return new Set()
-  return new Set(norm.split(' ').filter((token) => token.length > 0))
 }
 
 // 中文没有空格，按「词」切分算 Jaccard 会把同一句话判成不相似。
@@ -126,7 +133,176 @@ export function matchFollowUp(prevIssues, nextIssues) {
   return result
 }
 
-async function listTaskDirs(projectRoot) {
+/**
+ * 只与「确实跑过模型并留下报告」的下一轮比较：
+ *  - 下一轮 pass 且问题清空，正是“已修复”的最强证据，不能因为 issues 为空而被跳过；
+ *  - nothing-to-review 没有 review-N.json（代码没变、没人复检），不能算作“已消失”。
+ */
+function nextReviewedRound(rounds, reportedRounds, round) {
+  const next = rounds.find(
+    (candidate) =>
+      candidate.round > round && reportedRounds.has(candidate.round) && candidate.verdict !== 'nothing-to-review',
+  )
+  return next ? { round: next.round, mode: next.mode, issues: next.issues } : null
+}
+
+/**
+ * 跨轮问题生命周期（纯函数，便于单测）。
+ * 基于稳定 key；keyless 条目保持 unknown，交给 disposition 推断。
+ * state: new | still-there | fixed | reopened | unreviewed | unknown
+ */
+export function deriveLifecycles(rounds, reportedRounds) {
+  const byKey = new Map()
+  for (const round of rounds) {
+    for (const issue of round.issues) {
+      if (!issue?.key) continue
+      if (!byKey.has(issue.key)) byKey.set(issue.key, [])
+      const list = byKey.get(issue.key)
+      if (!list.includes(round.round)) list.push(round.round)
+    }
+  }
+  for (const list of byKey.values()) list.sort((a, b) => a - b)
+
+  const reopened = new Set()
+  for (const [key, list] of byKey) {
+    for (let index = 1; index < list.length; index += 1) {
+      const from = list[index - 1]
+      const to = list[index]
+      const hadGap = rounds.some(
+        (candidate) =>
+          candidate.round > from &&
+          candidate.round < to &&
+          reportedRounds.has(candidate.round) &&
+          candidate.verdict !== 'nothing-to-review',
+      )
+      if (hadGap) reopened.add(`${key}|${to}`)
+    }
+  }
+
+  for (const round of rounds) {
+    const followUp = nextReviewedRound(rounds, reportedRounds, round.round)
+    for (const issue of round.issues) {
+      if (!issue?.key) {
+        issue.lifecycle = { state: 'unknown', firstRound: null, lastRound: null, seen: 0, reopened: false }
+        continue
+      }
+      const list = byKey.get(issue.key)
+      const first = list[0]
+      const last = list[list.length - 1]
+      const isReopened = reopened.has(`${issue.key}|${round.round}`)
+      const isLatestHistory = !rounds.some((candidate) => candidate.round > round.round)
+      let state
+      if (isReopened) state = 'reopened'
+      else if (round.round === last && followUp) state = 'fixed'
+      else if (round.round === first && (round.round < last || isLatestHistory)) state = 'new'
+      else if (round.round < last) state = 'still-there'
+      else if (list.length > 1) state = 'still-there'
+      else state = 'unreviewed'
+      issue.lifecycle = { state, firstRound: first, lastRound: last, seen: list.length, reopened: isReopened }
+    }
+  }
+}
+
+/** 下一件事：让看板告诉人该做什么，而不只是展示状态。 */
+export function deriveNextAction(active) {
+  const rounds = Array.isArray(active?.rounds) ? active.rounds : []
+  if (rounds.length === 0) {
+    return {
+      key: 'review',
+      tone: 'brand',
+      label: '跑第一次审核',
+      detail: '让主代理跑一次 claude_review，建立第一轮基线。',
+    }
+  }
+  const latest = [...rounds].sort((a, b) => b.round - a.round)[0]
+  const mustFix = (latest.counts?.critical || 0) + (latest.counts?.important || 0)
+  if (latest.verdict === 'fix' || latest.verdict === 'reject') {
+    return {
+      key: 'fix',
+      tone: 'bad',
+      label: mustFix > 0 ? `修 ${mustFix} 条必修问题` : '按结论修复',
+      detail: '修完重跑同一模式；不要直接跑 gate。',
+    }
+  }
+  if (latest.verdict === 'pass' || latest.verdict === 'gate-pass') {
+    if (latest.mode !== 'full') {
+      return { key: 'full', tone: 'warn', label: '跑一次 full 收尾', detail: '收尾门禁要求最近一次是 full。' }
+    }
+    if (active?.gate?.state === 'blocked') {
+      return {
+        key: 'gate',
+        tone: 'bad',
+        label: '处理门禁阻断',
+        detail: active.gate.reason || '先处理阻断，再跑 gate。',
+      }
+    }
+    return { key: 'gate', tone: 'ok', label: '跑 gate 复核', detail: '提交前复核快照是否仍与审核时一致。' }
+  }
+  if (latest.verdict === 'nothing-to-review') {
+    if (latest.mode === 'full') {
+      if (active?.gate?.state === 'blocked') {
+        return {
+          key: 'gate',
+          tone: 'bad',
+          label: '处理门禁阻断',
+          detail: active.gate.reason || '先处理阻断，再跑 gate。',
+        }
+      }
+      if (active?.gate?.state === 'pass') {
+        return { key: 'gate', tone: 'ok', label: '跑 gate 复核', detail: '审核后工作区没有变化，直接复核门禁。' }
+      }
+      return { key: 'gate', tone: 'ok', label: '跑 gate 复核', detail: '复核门禁后提交。' }
+    }
+    return { key: 'full', tone: 'warn', label: '跑一次 full 收尾', detail: '收尾门禁要求最近一次是 full。' }
+  }
+  return {
+    key: 'review',
+    tone: 'warn',
+    label: '检查最近一轮结论',
+    detail: `最近一轮结论是 ${latest.verdict || '未知'}。`,
+  }
+}
+
+function deriveGate(history) {
+  const last = history.length > 0 ? history[history.length - 1] : null
+  if (!last) return { state: 'unknown', reason: '还没有审核记录', source: 'panel' }
+  const suffix = '（面板口径，提交前请跑 claude_review gate 复核快照是否仍一致）'
+  if (last.degraded) return { state: 'blocked', reason: `最近一次审核在快照降级下运行${suffix}`, source: 'panel' }
+  if (last.mode !== 'full') {
+    return { state: 'blocked', reason: `最近一次是 ${last.mode}，收尾门禁要求 full${suffix}`, source: 'panel' }
+  }
+  if (last.verdict === 'pass' || last.verdict === 'nothing-to-review') {
+    return { state: 'pass', reason: `第 ${last.round} 轮 full 通过${suffix}`, source: 'panel' }
+  }
+  return { state: 'blocked', reason: `最近一次 full 结论是 ${last.verdict}${suffix}`, source: 'panel' }
+}
+
+async function readRunState(reviewDir) {
+  const run = await readJsonOr(join(reviewDir, 'run.json'), null)
+  if (!run || typeof run !== 'object') return null
+  const status = String(run.status ?? '')
+  if (status === 'done') return null
+  const updated = Date.parse(String(run.updatedAt ?? ''))
+  const started = Date.parse(String(run.startedAt ?? ''))
+  const ageSec = Number.isFinite(updated) ? Math.max(0, Math.round((Date.now() - updated) / 1000)) : null
+  const elapsedSec = Number.isFinite(started) ? Math.max(0, Math.round((Date.now() - started) / 1000)) : ageSec
+  return {
+    status,
+    phase: String(run.phase ?? ''),
+    startedAt: String(run.startedAt ?? ''),
+    updatedAt: String(run.updatedAt ?? ''),
+    elapsedSec,
+    stale: status === 'running' && ageSec !== null && ageSec > 120,
+    error: String(run.error ?? ''),
+    verdict: String(run.verdict ?? ''),
+  }
+}
+
+async function listTaskDirs(projectRoot, storage = 'trellis') {
+  if (storage === 'local') {
+    const dir = join(projectRoot, LOCAL_LEDGER)
+    return (await isDirectory(dir)) ? [{ name: 'local', dir }] : []
+  }
   const tasksRoot = join(projectRoot, '.trellis', 'tasks')
   let names = []
   try {
@@ -145,21 +321,43 @@ async function listTaskDirs(projectRoot) {
   return dirs
 }
 
-function deriveGate(history) {
-  const last = history.length > 0 ? history[history.length - 1] : null
-  if (!last) return { state: 'unknown', reason: '还没有审核记录', source: 'panel' }
-  const suffix = '（面板口径，提交前请跑 claude_review gate 复核快照是否仍一致）'
-  if (last.degraded) return { state: 'blocked', reason: `最近一次审核在快照降级下运行${suffix}`, source: 'panel' }
-  if (last.mode !== 'full') {
-    return { state: 'blocked', reason: `最近一次是 ${last.mode}，收尾门禁要求 full${suffix}`, source: 'panel' }
-  }
-  if (last.verdict === 'pass' || last.verdict === 'nothing-to-review') {
-    return { state: 'pass', reason: `第 ${last.round} 轮 full 通过${suffix}`, source: 'panel' }
-  }
-  return { state: 'blocked', reason: `最近一次 full 结论是 ${last.verdict}${suffix}`, source: 'panel' }
+function taskNameFromRoot(root) {
+  return String(root ?? '')
+    .split(/[\\/]/)
+    .filter(Boolean)
+    .pop() || String(root ?? '')
 }
 
-async function readTaskDetail(taskDir) {
+function syntheticLocalTask(root) {
+  const title = taskNameFromRoot(root)
+  const task = {
+    dir: join(root, LOCAL_LEDGER),
+    id: 'local',
+    name: 'local',
+    title,
+    status: 'in_progress',
+    priority: '',
+    branch: '',
+  }
+  const base = {
+    task,
+    storage: 'local',
+    artifacts: { prd: false, design: false, implement: false },
+    manifests: { check: 0, implement: 0 },
+    gate: { state: 'unknown', reason: '还没有审核记录', source: 'panel' },
+    rounds: [],
+    lastRound: null,
+    totalCostUsd: 0,
+    pending: 0,
+    lastVerdict: '',
+    nextAction: null,
+    run: null,
+  }
+  base.nextAction = deriveNextAction(base)
+  return base
+}
+
+async function readTaskDetail(taskDir, storage = 'trellis', entryName = '') {
   const task = await readJsonOr(join(taskDir, 'task.json'), {})
   const artifacts = {
     prd: await exists(join(taskDir, 'prd.md')),
@@ -190,8 +388,7 @@ async function readTaskDetail(taskDir) {
     if (!row || typeof row !== 'object') continue
     const round = Number(row.round)
     if (!Number.isFinite(round)) continue
-    const reportFile = join(reviewDir, `review-${round}.json`)
-    const report = await readJsonOr(reportFile, null)
+    const report = await readJsonOr(join(reviewDir, `review-${round}.json`), null)
     if (report !== null) reportedRounds.add(round)
     rounds.push({
       round,
@@ -208,6 +405,15 @@ async function readTaskDetail(taskDir) {
         minor: Number(row.minor ?? 0),
       },
       summary: String(report?.review?.summary ?? ''),
+      assessment: String(report?.review?.assessment ?? ''),
+      strengths: Array.isArray(report?.review?.strengths)
+        ? report.review.strengths
+            .map((item) => ({ point: String(item?.point ?? ''), evidence: String(item?.evidence ?? '') }))
+            .filter((item) => item.point !== '')
+        : [],
+      recommendations: Array.isArray(report?.review?.recommendations)
+        ? report.review.recommendations.map(String).filter(Boolean)
+        : [],
       issues: Array.isArray(report?.review?.issues)
         ? report.review.issues.map((issue, index) => ({
             index,
@@ -225,16 +431,7 @@ async function readTaskDetail(taskDir) {
 
   rounds.sort((a, b) => a.round - b.round)
 
-  // 只与「确实跑过模型并留下报告」的下一轮比较：
-  //  - 下一轮 pass 且问题清空，正是“已修复”的最强证据，不能因为 issues 为空而被跳过；
-  //  - nothing-to-review 没有 review-N.json（代码没变、没人复检），不能算作“已消失”。
-  const nextReviewedRound = (round) => {
-    const next = rounds.find(
-      (candidate) =>
-        candidate.round > round && reportedRounds.has(candidate.round) && candidate.verdict !== 'nothing-to-review',
-    )
-    return next ? { round: next.round, mode: next.mode, issues: next.issues } : null
-  }
+  // 逐条问题的处置：显式记录优先，其次按下一轮复检推断
   for (const round of rounds) {
     const explicitByKey = new Map()
     for (const [mapKey, row] of dispositions) {
@@ -242,7 +439,7 @@ async function readTaskDetail(taskDir) {
       if (Number(rowRound) !== round.round) continue
       explicitByKey.set(mapKey.split('|')[1], row)
     }
-    const followUp = nextReviewedRound(round.round)
+    const followUp = nextReviewedRound(rounds, reportedRounds, round.round)
     const followUpLabel = followUp ? `第 ${followUp.round} 轮${followUp.mode ? `（${followUp.mode}）` : ''}` : ''
     const matches = followUp ? matchFollowUp(round.issues, followUp.issues) : new Map()
     round.issues = round.issues.map((issue) => {
@@ -275,107 +472,153 @@ async function readTaskDetail(taskDir) {
     })
   }
 
-  return {
+  deriveLifecycles(rounds, reportedRounds)
+
+  const gate = deriveGate(history)
+  const latest = rounds.length > 0 ? rounds[rounds.length - 1] : null
+  const totalCostUsd = rounds.reduce((sum, round) => sum + (Number(round.costUsd) || 0), 0)
+  const pending = latest ? (latest.counts.critical || 0) + (latest.counts.important || 0) : 0
+  const detail = {
     task: {
       dir: taskDir,
       id: String(task.id ?? ''),
+      name: String(task.name ?? entryName ?? ''),
       title: String(task.title ?? ''),
       status: String(task.status ?? ''),
       priority: String(task.priority ?? ''),
       branch: String(task.branch ?? ''),
     },
+    storage,
     artifacts,
     manifests: { check: checkRows.length, implement: implementRows.length },
-    gate: deriveGate(history),
+    gate,
     rounds,
-    lastRound: rounds.length > 0 ? rounds[rounds.length - 1].round : null,
+    lastRound: latest ? latest.round : null,
+    lastVerdict: latest ? latest.verdict : '',
+    pending,
+    totalCostUsd,
+    nextAction: null,
+    run: await readRunState(reviewDir),
+  }
+  detail.nextAction = deriveNextAction(detail)
+  return detail
+}
+
+function summaryOf(detail, mtimeMs = 0) {
+  return {
+    name: detail.task.name,
+    title: detail.task.title || detail.task.name,
+    status: detail.task.status,
+    priority: detail.task.priority,
+    lastRound: detail.lastRound,
+    rounds: detail.rounds.length,
+    gate: detail.gate,
+    pending: detail.pending,
+    lastVerdict: detail.lastVerdict,
+    totalCostUsd: detail.totalCostUsd,
+    storage: detail.storage,
+    mtime: mtimeMs,
   }
 }
 
-async function latestJournalLine() {
-  // journal 属于开发者身份目录，路径不稳定；这里只做 best-effort 读取
-  return ''
-}
-
-/**
- * 读取一个项目（工作区）的协同面板数据。缺 `.trellis/` 时返回 null。
- */
-export async function loadPanel(projectRoot) {
-  const root = String(projectRoot ?? '').trim()
-  if (root === '') return { ok: false, error: 'cwd 为空' }
-  const trellisDir = join(root, '.trellis')
-  if (!(await exists(trellisDir))) return null
-
-  const tasks = []
-  for (const entry of await listTaskDirs(root)) {
-    const detail = await readTaskDetail(entry.dir)
-    tasks.push({
-      name: entry.name,
-      title: detail.task.title,
-      status: detail.task.status,
-      priority: detail.task.priority,
-      lastRound: detail.lastRound,
-      rounds: detail.rounds.length,
-      gate: detail.gate,
-      mtime: (await stat(entry.dir).catch(() => ({ mtimeMs: 0 }))).mtimeMs,
-    })
-  }
-
-  // 当前任务：有审核轮次的优先，其次按目录 mtime
+function selectActive(details) {
   let active = null
-  for (const entry of await listTaskDirs(root)) {
-    const detail = await readTaskDetail(entry.dir)
+  for (const detail of details) {
     if (detail.rounds.length === 0 && detail.task.status !== 'in_progress') continue
     if (active === null) {
       active = detail
       continue
     }
-    const pickExisting = (candidate) => candidate.rounds.length > 0
-    if (pickExisting(detail) && !pickExisting(active)) {
+    const hasRounds = (candidate) => candidate.rounds.length > 0
+    if (hasRounds(detail) && !hasRounds(active)) {
       active = detail
       continue
     }
-    const detailLast = detail.lastRound ?? -1
-    const activeLast = active.lastRound ?? -1
-    if (detailLast > activeLast) active = detail
+    if ((detail.lastRound ?? -1) > (active.lastRound ?? -1)) active = detail
+  }
+  return active
+}
+
+/**
+ * 读取一个项目（工作区）的协同面板数据。
+ * storage=auto 时 Trellis 优先；没有 .trellis 就用本地账本（即使账本还不存在，
+ * 也返回一个空的本地任务，让面板可以展示“跑第一次审核”的空状态）。
+ */
+export async function loadPanel(projectRoot, options = {}) {
+  const root = String(projectRoot ?? '').trim()
+  if (root === '') return { ok: false, error: 'cwd 为空' }
+  if (!(await isDirectory(root))) return { ok: false, error: 'cwd-not-found' }
+  const configured = STORAGE_MODES.has(String(options.storage ?? '')) ? String(options.storage) : 'auto'
+  const storage = configured === 'auto' ? ((await exists(join(root, '.trellis'))) ? 'trellis' : 'local') : configured
+  if (storage === 'trellis' && !(await exists(join(root, '.trellis')))) {
+    return { ok: false, error: 'trellis-not-initialized' }
   }
 
-  const journalLine = await latestJournalLine()
+  const entries = await listTaskDirs(root, storage)
+  const details = []
+  const mtimes = new Map()
+  for (const entry of entries) {
+    details.push(await readTaskDetail(entry.dir, storage, entry.name))
+    mtimes.set(entry.dir, (await stat(entry.dir).catch(() => ({ mtimeMs: 0 }))).mtimeMs)
+  }
+
+  if (storage === 'local' && details.length === 0) {
+    const synthetic = syntheticLocalTask(root)
+    details.push(synthetic)
+  }
+
+  const tasks = details.map((detail) => summaryOf(detail, mtimes.get(detail.task.dir) ?? 0))
+  const requested = typeof options.task === 'string' ? options.task.trim() : ''
+  let active = requested !== '' ? details.find((detail) => detail.task.name === requested) : null
+  if (!active) active = selectActive(details)
 
   return {
     ok: true,
-    project: { root, name: root.split(/[\\/]/).filter(Boolean).pop() ?? root, generatedAt: new Date().toISOString() },
-    active,
+    storage,
+    project: {
+      root,
+      name: taskNameFromRoot(root),
+      generatedAt: new Date().toISOString(),
+    },
+    active: active || null,
     tasks: tasks.sort((a, b) => (b.lastRound ?? -1) - (a.lastRound ?? -1)),
-    journalLine,
   }
 }
 
 /**
- * 解析要写入处置记录的任务目录：显式指定优先，否则取「最新有审核记录」的任务，
- * 再退化为最新 in_progress 任务。
+ * 解析要写入处置记录的任务目录：显式指定优先；Trellis 取「最新有审核记录」，
+ * 本地模式取 `.dsh/claude-review/ledger`。
  */
-export async function resolveTaskDir(projectRoot, explicit) {
+export async function resolveTaskDir(projectRoot, explicit, options = {}) {
   const root = String(projectRoot ?? '').trim()
   if (root === '') throw new Error('cwd 为空')
   if (typeof explicit === 'string' && explicit.trim() !== '') {
     const dir = isAbsolute(explicit) ? explicit : join(root, explicit)
     if ((await exists(join(dir, 'task.json'))) || (await exists(join(dir, 'review')))) return dir
-    throw new Error(`任务目录不存在或不是 Trellis 任务：${dir}`)
+    throw new Error(`任务目录不存在或不是审核任务：${dir}`)
   }
+
+  const configured = STORAGE_MODES.has(String(options.storage ?? '')) ? String(options.storage) : 'auto'
+  const storage = configured === 'auto' ? ((await exists(join(root, '.trellis'))) ? 'trellis' : 'local') : configured
+  if (storage === 'local') {
+    const dir = join(root, LOCAL_LEDGER)
+    if ((await exists(join(dir, 'task.json'))) || (await exists(join(dir, 'review')))) return dir
+    throw new Error('还没有本地审核账本；先跑一次 claude_review 再记录处置。')
+  }
+
+  const entries = await listTaskDirs(root, 'trellis')
   let best = null
-  for (const entry of await listTaskDirs(root)) {
+  for (const entry of entries) {
     const info = await stat(join(entry.dir, 'review', 'history.jsonl')).catch(() => null)
     if (!info) continue
     if (!best || info.mtimeMs > best.mtimeMs) best = { dir: entry.dir, mtimeMs: info.mtimeMs }
   }
   if (best) return best.dir
-  for (const entry of await listTaskDirs(root)) {
+  for (const entry of entries) {
     const task = await readJsonOr(join(entry.dir, 'task.json'), {})
     if (String(task.status) === 'in_progress') return entry.dir
   }
-  // 退化为「已经有 review/ 目录」的最新任务（半初始化或测试 fixture）
-  for (const entry of await listTaskDirs(root)) {
+  for (const entry of entries) {
     const info = await stat(join(entry.dir, 'review')).catch(() => null)
     if (!info?.isDirectory()) continue
     if (!best || info.mtimeMs > best.mtimeMs) best = { dir: entry.dir, mtimeMs: info.mtimeMs }

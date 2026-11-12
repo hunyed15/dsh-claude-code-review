@@ -11,7 +11,7 @@
  * normalizes the JSON envelope into the tool result. Keeping one engine means
  * the CLI/Trellis workflow and the in-app tool never drift apart.
  */
-import { access } from 'node:fs/promises'
+import { access, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -55,6 +55,15 @@ async function exists(path) {
   }
 }
 
+async function isDirectory(path) {
+  try {
+    const info = await stat(path)
+    return info.isDirectory()
+  } catch {
+    return false
+  }
+}
+
 function agentCwd(ctx, exec, explicit) {
   if (typeof explicit === 'string' && explicit.trim() !== '') return resolve(explicit)
   const wd = ctx.get('workingDirectory')
@@ -69,6 +78,12 @@ function agentCwd(ctx, exec, explicit) {
   const fromHeader = exec.agent?.session?.header?.cwd
   if (typeof fromHeader === 'string' && fromHeader !== '') return fromHeader
   return process.cwd()
+}
+
+// 插件只认 cordis.patch.yml 这一层 storage；引擎的 -Storage 由这里传入。
+// 直接 CLI 调用才用引擎自己的 -Storage（config.json 不再提供 storage，避免双源）。
+function storageMode(config) {
+  return ['auto', 'trellis', 'local'].includes(config?.storage) ? config.storage : 'auto'
 }
 
 async function resolveEngine(ctx, cwd, config) {
@@ -112,6 +127,7 @@ function normalizedResult(envelope, exitCode) {
     summary: String(envelope?.summary ?? ''),
     reportPath: String(envelope?.report ?? ''),
     markdownPath: String(envelope?.markdown ?? ''),
+    storage: String(envelope?.storage ?? ''),
     costUsd: typeof envelope?.cost_usd === 'number' ? envelope.cost_usd : 0,
     exitCode,
     dryRun: envelope?.dryRun === true,
@@ -166,16 +182,6 @@ function jsonResponse(payload, status = 200) {
   })
 }
 
-async function hasTrellis(dir) {
-  if (typeof dir !== 'string' || dir.trim() === '') return false
-  try {
-    await access(join(dir, '.trellis'))
-    return true
-  } catch {
-    return false
-  }
-}
-
 function attempt(fn) {
   try {
     return fn()
@@ -216,7 +222,9 @@ export async function resolveCwdForSession(ctx, sessionId, options = {}) {
   }
   const unique = [...new Set(candidates.filter((candidate) => candidate !== ''))]
   for (const candidate of unique) {
-    if (await hasTrellis(candidate)) return candidate
+    // 本地模式不要求 .trellis：会话自己的工作目录就是一个合法项目。
+    if (!(await isDirectory(candidate))) continue
+    return candidate
   }
   return ''
 }
@@ -290,6 +298,7 @@ export function apply(ctx, config = {}) {
           summary: { type: 'string' },
           reportPath: { type: 'string' },
           markdownPath: { type: 'string' },
+          storage: { type: 'string' },
           costUsd: { type: 'number' },
           exitCode: { type: 'integer' },
           dryRun: { type: 'boolean' },
@@ -309,11 +318,22 @@ export function apply(ctx, config = {}) {
     async execute(args, exec) {
       const options = args ?? {}
       const mode = ['incremental', 'full', 'gate'].includes(options.mode) ? options.mode : 'incremental'
+      const storage = storageMode(config)
       const cwd = agentCwd(ctx, exec, options.cwd)
       const engine = await resolveEngine(ctx, cwd, config)
       const pwsh = await ctx.subprocess.resolveExecutable('pwsh')
 
-      const parts = ['-Mode', psQuote(mode), '-Cwd', psQuote(cwd), '-Json', '-TimeoutSec', String(configuredTimeoutSec)]
+      const parts = [
+        '-Mode',
+        psQuote(mode),
+        '-Storage',
+        psQuote(storage),
+        '-Cwd',
+        psQuote(cwd),
+        '-Json',
+        '-TimeoutSec',
+        String(configuredTimeoutSec),
+      ]
       const sessionId = typeof exec.agent?.id === 'string' ? exec.agent.id : ''
       if (sessionId !== '') {
         parts.push('-SessionId', psQuote(sessionId))
@@ -432,15 +452,13 @@ export function apply(ctx, config = {}) {
             }
             const sessionId = url.searchParams.get('sessionId') ?? ''
             const requestedCwd = url.searchParams.get('cwd') ?? ''
-            let cwd =
-              sessionId !== ''
-                ? await resolveCwdForSession(ctx, sessionId, {
-                    fallbackToDefaultWorkspace: config.fallbackToDefaultWorkspace === true,
-                  })
-                : ''
+            const task = url.searchParams.get('task') ?? ''
+            let cwd = await resolveCwdForSession(ctx, sessionId, {
+              fallbackToDefaultWorkspace: config.fallbackToDefaultWorkspace === true,
+            })
             if (requestedCwd !== '') {
               // 路径授权：默认只允许「与会话自身项目一致」的 cwd（调试用途），
-              // 否则本机任意进程都能让面板去读机器上任意一个含 .trellis 的目录。
+              // 否则本机任意进程都能让面板去读机器上任意一个项目目录。
               const resolvedRequested = isAbsolute(requestedCwd) ? resolve(requestedCwd) : resolve(cwd || process.cwd(), requestedCwd)
               // Windows 路径大小写不敏感：直接字符串比较会把 D:\\coding\\xinhuo 误判成「不同项目」
               const samePath = (a, b) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b)
@@ -450,8 +468,7 @@ export function apply(ctx, config = {}) {
             }
             // 解析不出会话所属项目就明确拒绝，绝不回退到宿主默认项目（那会让任意无效 sessionId 读到别人项目）
             if (cwd === '') return jsonResponse({ ok: false, error: 'session-not-resolved' }, 404)
-            const panel = await loadPanel(cwd)
-            if (panel === null) return jsonResponse({ ok: false, error: 'no-trellis', cwd })
+            const panel = await loadPanel(cwd, { storage: storageMode(config), task })
             return jsonResponse(panel)
           } catch (error) {
             return jsonResponse({ ok: false, error: String(error?.message ?? error) }, 500)
@@ -563,7 +580,7 @@ export function apply(ctx, config = {}) {
     async execute(args, exec) {
       const options = args ?? {}
       const cwd = agentCwd(ctx, exec, options.cwd)
-      const taskDir = await resolveTaskDir(cwd, options.taskDir)
+      const taskDir = await resolveTaskDir(cwd, options.taskDir, { storage: storageMode(config) })
       const batch = Array.isArray(options.entries) && options.entries.length > 0 ? options.entries : []
       const single =
         options.round !== undefined || options.key !== undefined || options.index !== undefined

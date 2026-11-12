@@ -11,6 +11,7 @@ Thumbs.db
 # Generated review artifacts (the engine excludes these from snapshots too)
 .trellis/.runtime/
 .trellis/tasks/*/review/
+.dsh/claude-review/ledger/
 
 # Local scratch
 *.local

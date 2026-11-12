@@ -1,5 +1,5 @@
 {
-  "$comment": "审核引擎运行参数（插件自带副本在 scripts/ 下；被审仓库可放自己的 config.json）。修改后无需重启，脚本每次读取。",
+  "$comment": "审核引擎运行参数（插件自带副本在 scripts/ 下；被审仓库可放自己的 config.json）。storage 不在本文件配置：插件调用以 cordis.patch.yml 的 storage 为准，直接 CLI 用 -Storage（默认 auto）。修改后无需重启，脚本每次读取。",
   "claudeExe": "",
   "model": "",
   "effort": "low",
@@ -10,10 +10,12 @@
   "failOn": ["critical", "important"],
   "reviewerRoleFile": ".trellis/agents/review.md",
   "snapshotExcludePathspecs": [
-    ":(exclude).trellis/tasks/*/review/**"
+    ":(exclude).trellis/tasks/*/review/**",
+    ":(exclude).dsh/claude-review/ledger/**"
   ],
   "excludePathspecs": [
     ":(exclude).trellis/tasks/*/review/**",
+    ":(exclude).dsh/claude-review/ledger/**",
     ":(exclude).trellis/.runtime/**",
     ":(exclude)node_modules/**",
     ":(exclude)**/node_modules/**",

@@ -12,7 +12,7 @@
       2. 从 Trellis 活跃任务取上下文，报告落进 .trellis/tasks/<task>/review/，随任务归档；
       3. 提供 -Mode gate，供 Phase 3.4 提交前做纯本地门禁校验（不调模型）。
 
-    审核员只读：挂 Read/Grep/Glob 与受限 Bash(git)，禁 Write/Edit，权限提示一律拒绝。
+    审核员只读：只挂 Read/Grep/Glob，不开放 Bash，禁 Write/Edit，权限提示一律拒绝。
 
 .PARAMETER Mode
     incremental（默认）| full | gate
@@ -70,6 +70,8 @@ param(
     [ValidateSet('incremental', 'full', 'gate')]
     [string]$Mode = 'incremental',
     [string]$Cwd = '',
+    [ValidateSet('auto', 'trellis', 'local')]
+    [string]$Storage = 'auto',
     [string]$TaskDir = '',
     [string[]]$Paths = @(),
     [string]$Description = '',
@@ -96,7 +98,14 @@ $PSNativeCommandUseErrorActionPreference = $false
 try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }
 
 function Write-Info([string]$m) { if (-not $Json) { [Console]::Out.WriteLine("claude-review: $m") } }
+$script:runStatePath = ''
 function Fail([string]$m, [int]$code = 2) {
+    if ($script:runStatePath) {
+        try {
+            $failed = [ordered]@{ status = 'failed'; phase = 'failed'; error = $m; updatedAt = (Get-Date).ToString('s') }
+            [IO.File]::WriteAllText($script:runStatePath, ($failed | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+        } catch { }
+    }
     if ($Json) {
         [Console]::Out.WriteLine((@{ ok = $false; error = $m; exitCode = $code } | ConvertTo-Json -Compress))
     } else {
@@ -132,7 +141,8 @@ $cfg = @{
     maxRounds        = 3
     failOn           = @('critical', 'important')
     reviewerRoleFile = '.trellis/agents/review.md'
-    excludePathspecs = @()
+    snapshotExcludePathspecs = @(':(exclude).trellis/tasks/*/review/**', ':(exclude).dsh/claude-review/ledger/**')
+    excludePathspecs = @(':(exclude).trellis/tasks/*/review/**', ':(exclude).dsh/claude-review/ledger/**')
 }
 if (Test-Path -LiteralPath $configPath) {
     try {
@@ -149,6 +159,14 @@ if ($MaxDiffChars -le 0) { $MaxDiffChars = [int]$cfg.maxDiffChars }
 if ([string]::IsNullOrWhiteSpace($Model)) { $Model = [string]$cfg.model }
 if ([string]::IsNullOrWhiteSpace($Effort)) { $Effort = [string]$cfg.effort }
 $failOn = @($cfg.failOn)
+
+# 存储选择：-Storage 是唯一入口（插件从 cordis.patch.yml 传，直接 CLI 自己传；
+# 未传时默认 auto）。不从 config.json 再读一份，避免双源静默路由。
+$hasTrellis = Test-Path -LiteralPath (Join-Path $root '.trellis')
+if ($Storage -eq 'auto') { $Storage = if ($hasTrellis) { 'trellis' } else { 'local' } }
+if ($Storage -eq 'trellis' -and -not $hasTrellis) {
+    Fail "storage=trellis 但 $root 下没有 .trellis。先初始化 Trellis，或改用 -Storage local / auto。"
+}
 
 # 数组型参数允许两种写法：重复传参（-Checks a -Checks b，仅命令行）或逗号分隔（-Checks "a,b"）
 $Checks = @(
@@ -181,8 +199,8 @@ if ($Mode -eq 'gate' -and $Paths.Count -gt 0) {
     $Paths = @()
 }
 
-# ---------------------------------------------------------------- 1. 任务目录
-function Resolve-TaskDir([string]$explicit) {
+# ---------------------------------------------------------------- 1. 审核账本（Trellis / 本地）
+function Resolve-TrellisTaskDir([string]$explicit) {
     if (-not [string]::IsNullOrWhiteSpace($explicit)) {
         $p = $explicit
         if (-not [IO.Path]::IsPathRooted($p)) { $p = Join-Path $root $p }
@@ -251,8 +269,49 @@ function Resolve-TaskDir([string]$explicit) {
     return $adhoc
 }
 
-$taskPath = Resolve-TaskDir $TaskDir
-$taskName = Split-Path -Leaf $taskPath
+function Get-LocalLedgerDir {
+    return (Join-Path $root '.dsh/claude-review/ledger')
+}
+
+function Initialize-LocalLedger([string]$dir) {
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $taskJson = Join-Path $dir 'task.json'
+    if (-not (Test-Path -LiteralPath $taskJson)) {
+        $repoName = Split-Path -Leaf $root
+        $task = [ordered]@{
+            id          = 'local'
+            name        = 'local'
+            title       = $repoName
+            description = 'Local review ledger (no Trellis)'
+            status      = 'in_progress'
+            priority    = ''
+            storage     = 'local'
+            createdAt   = (Get-Date).ToString('s')
+        }
+        [IO.File]::WriteAllText($taskJson, ($task | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding($false)))
+        Write-Info "本地审核账本：$dir"
+    }
+}
+
+function Resolve-ReviewStore([string]$storage, [string]$explicit) {
+    if (-not [string]::IsNullOrWhiteSpace($explicit)) {
+        $p = $explicit
+        if (-not [IO.Path]::IsPathRooted($p)) { $p = Join-Path $root $p }
+        if (-not (Test-Path -LiteralPath $p)) { Fail "任务目录不存在：$p" }
+        return @{ Storage = $storage; TaskDir = (Resolve-Path -LiteralPath $p).Path }
+    }
+    if ($storage -eq 'trellis') {
+        return @{ Storage = 'trellis'; TaskDir = (Resolve-TrellisTaskDir '') }
+    }
+    $dir = Get-LocalLedgerDir
+    Initialize-LocalLedger $dir
+    return @{ Storage = 'local'; TaskDir = $dir }
+}
+
+$store = Resolve-ReviewStore $Storage $TaskDir
+$storageMode = $store.Storage
+$taskPath = $store.TaskDir
+$taskName = if ($storageMode -eq 'local') { 'local' } else { Split-Path -Leaf $taskPath }
 if ([string]::IsNullOrWhiteSpace($OutDir)) { $OutDir = Join-Path $taskPath 'review' }
 New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 $statePath = Join-Path $OutDir 'state.json'
@@ -396,7 +455,7 @@ if ($Mode -eq 'gate') {
     # 这个检查必须早于下面任何放行分支（包括「干净工作区」分支），否则未跟踪改动会漏检。
     if ($historyCorrupt) {
         $msg = 'history.jsonl 最后一行不可解析（可能中断写入/手工改动），无法判定最近一次审核结论，门禁 fail-closed。人工核对后修复或删除该行。'
-        if ($Json) { [Console]::Out.WriteLine((@{ ok = $false; gate = 'blocked'; reasons = @($msg) } | ConvertTo-Json -Compress)) }
+        if ($Json) { [Console]::Out.WriteLine((@{ ok = $false; gate = 'blocked'; reasons = @($msg); storage = $storageMode } | ConvertTo-Json -Compress)) }
         else {
             Write-Output "gate      : blocked"
             Write-Output "  - $msg"
@@ -407,7 +466,7 @@ if ($Mode -eq 'gate') {
 
     if ((-not $snapshotOk) -or [string]::IsNullOrWhiteSpace($headRev)) {
         $msg = '快照降级：无法可靠判定是否还有未审改动（未跟踪文件会漏检），门禁 fail-closed。请在 git 索引可写时重跑 -Mode full，或人工确认后再提交。'
-        if ($Json) { [Console]::Out.WriteLine((@{ ok = $false; gate = 'blocked'; reasons = @($msg) } | ConvertTo-Json -Compress)) }
+        if ($Json) { [Console]::Out.WriteLine((@{ ok = $false; gate = 'blocked'; reasons = @($msg); storage = $storageMode } | ConvertTo-Json -Compress)) }
         else {
             Write-Output "gate      : blocked"
             Write-Output "  - $msg"
@@ -435,7 +494,7 @@ if ($Mode -eq 'gate') {
             # 两种子情形文案要分开：从未审核过 ≠ 已审核且没再改动
             $reasonCode = if (-not $last) { 'nothing-to-review' } else { 'reviewed-snapshot-unchanged' }
             $reasonText = if (-not $last) { '当前没有待审改动，也没有审核历史（无事可做）' } else { '工作区与最近一次通过的 full 审核快照一致（无新增未审改动）' }
-            if ($Json) { [Console]::Out.WriteLine((@{ ok = $true; gate = 'pass'; reason = $reasonCode; mode = $Mode } | ConvertTo-Json -Compress)) }
+            if ($Json) { [Console]::Out.WriteLine((@{ ok = $true; gate = 'pass'; reason = $reasonCode; mode = $Mode; storage = $storageMode } | ConvertTo-Json -Compress)) }
             else {
                 Write-Output "gate      : pass"
                 Write-Output "reason    : $reasonText"
@@ -458,11 +517,11 @@ if ($Mode -eq 'gate') {
         }
     }
     if ($reasons.Count -eq 0) {
-        if ($Json) { [Console]::Out.WriteLine((@{ ok = $true; gate = 'pass'; report = $last.report } | ConvertTo-Json -Compress)) }
+        if ($Json) { [Console]::Out.WriteLine((@{ ok = $true; gate = 'pass'; report = $last.report; storage = $storageMode } | ConvertTo-Json -Compress)) }
         else { Write-Output "gate      : pass"; Write-Output "report    : $($last.report)" }
         exit 0
     }
-    if ($Json) { [Console]::Out.WriteLine((@{ ok = $false; gate = 'blocked'; reasons = $reasons } | ConvertTo-Json -Compress)) }
+    if ($Json) { [Console]::Out.WriteLine((@{ ok = $false; gate = 'blocked'; reasons = $reasons; storage = $storageMode } | ConvertTo-Json -Compress)) }
     else {
         Write-Output "gate      : blocked"
         foreach ($r in $reasons) { Write-Output "  - $r" }
@@ -494,7 +553,7 @@ if ([string]::IsNullOrWhiteSpace($diffText)) {
     $state.updatedAt = (Get-Date).ToString('s')
     if ($snapshotOk -and $headRev) { $state.lastSnapshot = $headRev }
     [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
-    if ($Json) { [Console]::Out.WriteLine((@{ ok = $true; nothingToReview = $true; mode = $Mode; round = $cleanRound; snapshot = $headRev; snapshotOk = $snapshotOk } | ConvertTo-Json -Compress)) }
+    if ($Json) { [Console]::Out.WriteLine((@{ ok = $true; nothingToReview = $true; mode = $Mode; storage = $storageMode; round = $cleanRound; snapshot = $headRev; snapshotOk = $snapshotOk } | ConvertTo-Json -Compress)) }
     else {
         Write-Output "verdict   : nothing-to-review"
         Write-Output "mode      : $Mode"
@@ -517,20 +576,59 @@ if ($diffText.Length -gt $MaxDiffChars) {
 # ---------------------------------------------------------------- 5. 组装 prompt
 if ([string]::IsNullOrWhiteSpace($Description)) {
     $t = if ($taskTitle) { $taskTitle } else { '（未命名任务）' }
-    $Description = "Trellis 任务《$t》第 $round 轮实现（$Mode 模式，$fileCount 个文件）"
+    $scope = if ($storageMode -eq 'trellis') { "Trellis 任务《$t》" } else { "本地审核《$t》" }
+    $Description = "$scope 第 $round 轮实现（$Mode 模式，$fileCount 个文件）"
 }
 if ([string]::IsNullOrWhiteSpace($Requirements)) {
-    $reqFiles = @('prd.md', 'design.md', 'implement.md') | ForEach-Object { Join-Path $taskPath $_ } | Where-Object { Test-Path -LiteralPath $_ }
+    $candidates = if ($storageMode -eq 'trellis') {
+        @('prd.md', 'design.md', 'implement.md')
+    } else {
+        @('REVIEW.md', 'CONTRIBUTING.md')
+    }
+    $reqFiles = @($candidates | ForEach-Object { Join-Path $taskPath $_ } | Where-Object { Test-Path -LiteralPath $_ })
     if ($reqFiles.Count -gt 0) {
         $Requirements = ($reqFiles | ForEach-Object { "- $($_.Substring($root.Length).TrimStart('\', '/'))" }) -join "`n"
-    } else {
+    } elseif ($storageMode -eq 'trellis') {
         $Requirements = '（本任务没有 prd/design/implement，按 Description 与实际改动判断）'
+    } else {
+        $Requirements = '（本地账本没有任务产物；按 Description、实际改动和项目规范判断）'
     }
 }
 
-$rolePath = [string]$cfg.reviewerRoleFile
-if (-not [IO.Path]::IsPathRooted($rolePath)) { $rolePath = Join-Path $root $rolePath }
-$roleExists = Test-Path -LiteralPath $rolePath
+# 项目规范：只给路径，让审核员按需 Read，不把整棵 spec 内联。
+$specPaths = @()
+if ($storageMode -eq 'trellis') {
+    $specRoot = Join-Path $root '.trellis/spec'
+    if (Test-Path -LiteralPath $specRoot) {
+        $specPaths = @(
+            Get-ChildItem -LiteralPath $specRoot -Recurse -File -Filter 'index.md' -ErrorAction SilentlyContinue |
+                ForEach-Object { $_.FullName.Substring($root.Length).TrimStart('\', '/') } |
+                Select-Object -First 12
+        )
+    }
+} else {
+    foreach ($candidate in @('AGENTS.md', 'CLAUDE.md', 'CONTRIBUTING.md')) {
+        if (Test-Path -LiteralPath (Join-Path $root $candidate)) { $specPaths += $candidate }
+    }
+}
+$specText = if ($specPaths.Count -gt 0) { ($specPaths | ForEach-Object { "- $_" }) -join "`n" } else { '- （无项目规范文件）' }
+
+# 角色文件 = 项目自己的 reviewer role + 插件自带的通用 role（可同时存在）。
+$roleParts = @()
+$projectRole = [string]$cfg.reviewerRoleFile
+if (-not [string]::IsNullOrWhiteSpace($projectRole)) {
+    if (-not [IO.Path]::IsPathRooted($projectRole)) { $projectRole = Join-Path $root $projectRole }
+    if (Test-Path -LiteralPath $projectRole) { $roleParts += (Get-Content -LiteralPath $projectRole -Raw) }
+}
+$bundledRole = Join-Path $scriptRoot 'reviewer-role.md'
+if (Test-Path -LiteralPath $bundledRole) { $roleParts += (Get-Content -LiteralPath $bundledRole -Raw) }
+$rolePath = ''
+$roleExists = $false
+if ($roleParts.Count -gt 0) {
+    $rolePath = Join-Path $OutDir ("role-$round.md")
+    [IO.File]::WriteAllText($rolePath, ($roleParts -join "`n`n---`n`n"), (New-Object Text.UTF8Encoding($false)))
+    $roleExists = $true
+}
 
 $checksText = if ($Checks.Count -gt 0) { ($Checks | ForEach-Object { "- $_" }) -join "`n" } else { '- （本轮未提供客观检查结果；请自行判断改动是否需要补测试/编译）' }
 $focusText = if ($Focus) { $Focus } else { '无特别侧重，按下列维度常规审查。' }
@@ -550,8 +648,12 @@ $Description
 ## 验收要求 / 计划
 $Requirements
 
+## 项目规范（按需 Read，不要通读）
+$specText
+
 ## 审核范围
 模式: $Mode
+账本: $storageMode
 Base: $baseLabel
 Head: $(if ($headRev) { "工作区快照 $($headRev.Substring(0,[Math]::Min(12,$headRev.Length)))" } else { '工作区（快照降级）' })
 文件数: $fileCount
@@ -577,11 +679,11 @@ $inlineDiff
 ----- diff 结束 -----
 
 ## 评审要求（严格遵守）
-1. 先读任务产物（上面「验收要求 / 计划」里的路径），再判实现是否真的覆盖了它们，而不是完成了别的东西。
+1. 先读任务产物（上面「验收要求 / 计划」里的路径）和「项目规范」中与本轮文件相关的条目，再判实现是否真的覆盖了它们，而不是完成了别的东西。
 2. 只审本次 diff 及其**直接**影响面（被改函数/命令的调用方、对应类型与契约、相关测试）。不要通读仓库、不要点评无关模块。
 3. 每条 issue 必须给 severity + file + line + issue + why + fix。「测试通过」不是实现正确的证据；读不到、判不了的写进 assessment 并说明缺什么。
 4. 你只读：不要修改文件，不要执行 `git add/commit/checkout/stash/reset/clean`、不要安装依赖、不要启动服务。
-5. 工具可能受限（部分沙箱下只有 Read 可用，Grep/Glob/Bash 会被拒绝）。以内联 diff + 上面的改动文件清单为依据，必要时用 Read 打开被改文件；diff 被截断时按提示分段读完整 patch。工具被拒不是放弃取证的理由，也不要把「无法验证」当成通过。
+5. 工具可能受限（部分沙箱下只有 Read 可用，Grep/Glob 也会被拒绝；Bash 不开放）。以内联 diff + 上面的改动文件清单为依据，必要时用 Read 打开被改文件；diff 被截断时按提示分段读完整 patch。工具被拒不是放弃取证的理由，也不要把「无法验证」当成通过。
 6. severity 只用 critical / important / minor 三个词，不要写 BLOCKING/MAJOR/MINOR（词表不一致会让门禁失效）。
 7. 有 critical 或 important 时 verdict 必须是 fix 或 reject，不得 pass；只有 minor 或没有发现才可 pass。
 8. 没有真问题就给空 issues，不要凑数。
@@ -613,6 +715,7 @@ if ($DryRun) {
         ok          = $true
         dryRun      = $true
         mode        = $Mode
+        storage     = $storageMode
         task        = $taskName
         round       = $round
         files       = $fileCount
@@ -630,6 +733,7 @@ if ($DryRun) {
     else {
         Write-Output "dry-run   : 已组装审核输入，未调用模型"
         Write-Output "mode      : $Mode"
+        Write-Output "storage   : $storageMode"
         Write-Output "round     : $round"
         Write-Output "task      : $taskName"
         Write-Output "files     : $fileCount"
@@ -666,7 +770,9 @@ function Resolve-ClaudeExe([string]$explicit) {
 $claudeExe = Resolve-ClaudeExe ([string]$cfg.claudeExe)
 
 # ---------------------------------------------------------------- 7. 调用
-$cliArgs = @('-p', '--output-format', 'json', '--allowedTools', 'Read,Grep,Glob,Bash(git *)', '--disallowedTools', 'Write,Edit,NotebookEdit', '--permission-prompts', 'none')
+# 只读边界：只开放 Read/Grep/Glob，不开放 Bash（git 写操作、--output 写文件都无从谈起）。
+$allowedTools = 'Read,Grep,Glob'
+$cliArgs = @('-p', '--output-format', 'json', '--allowedTools', $allowedTools, '--disallowedTools', 'Write,Edit,NotebookEdit', '--permission-prompts', 'none')
 
 # 结构化输出：--json-schema 需要单个参数，Windows 下必须自己转义引号
 $schemaPath = Join-Path $scriptRoot 'review-schema.json'
@@ -698,12 +804,44 @@ $outFile = Join-Path $runDir 'out.json'
 $errFile = Join-Path $runDir 'err.txt'
 [IO.File]::WriteAllText($promptIn, $prompt, (New-Object Text.UTF8Encoding($false)))
 
+$runStatePath = Join-Path $OutDir 'run.json'
+$script:runStatePath = $runStatePath
+$runStartedAt = (Get-Date).ToString('s')
+function Write-RunState([string]$status, [string]$phase, [hashtable]$extra = @{}) {
+    $payload = [ordered]@{
+        status    = $status
+        phase     = $phase
+        storage   = $storageMode
+        mode      = $Mode
+        round     = $round
+        task      = $taskName
+        startedAt = $runStartedAt
+        updatedAt = (Get-Date).ToString('s')
+    }
+    foreach ($key in $extra.Keys) { $payload[$key] = $extra[$key] }
+    try {
+        [IO.File]::WriteAllText($runStatePath, ($payload | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+    } catch { }
+}
+
+Write-RunState 'running' 'starting' @{}
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $proc = Start-Process -FilePath $claudeExe -ArgumentList $cliArgs `
     -RedirectStandardInput $promptIn -RedirectStandardOutput $outFile -RedirectStandardError $errFile `
     -NoNewWindow -PassThru
-if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
-    try { $proc.Kill() } catch { }
+Write-RunState 'running' 'reviewing' @{ pid = $proc.Id }
+$timedOut = $false
+# 用 WaitForExit(5000) 做阻塞式探测：返回值会刷新进程状态，避免 HasExited 缓存误判；
+# 每次 5s 超时后再写心跳，既保留进度又不丢正常退出。
+while (-not $proc.WaitForExit(5000)) {
+    if ($sw.Elapsed.TotalSeconds -ge $TimeoutSec) {
+        $timedOut = $true
+        try { $proc.Kill() } catch { }
+        break
+    }
+    Write-RunState 'running' 'reviewing' @{ pid = $proc.Id; elapsedSec = [int]$sw.Elapsed.TotalSeconds }
+}
+if ($timedOut) {
     $sw.Stop()
     Get-ChildItem $runDir -File -ErrorAction SilentlyContinue | Copy-Item -Destination $OutDir -Force -ErrorAction SilentlyContinue
     Fail "审核超时（>${TimeoutSec}s）。可调大 -TimeoutSec、调小 -MaxDiffChars，或用 -Paths 缩小范围。"
@@ -866,6 +1004,7 @@ if ((-not $hadFailing) -and $verdict -ne 'pass') {
 $reportObj = [ordered]@{
     meta   = [ordered]@{
         task        = $taskName
+        storage     = $storageMode
         round       = $round
         mode        = $Mode
         base        = $baseLabel
@@ -935,6 +1074,7 @@ $mdPath = Join-Path $OutDir ("review-$round.md")
 $state.round = $round
 $state.lastMode = $Mode
 $state.lastVerdict = $verdict
+$state.storage = $storageMode
 $state.updatedAt = (Get-Date).ToString('s')
 if ($snapshotOk -and $headRev) { $state.lastSnapshot = $headRev }
 [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
@@ -943,6 +1083,7 @@ Add-History ([ordered]@{
         at        = (Get-Date).ToString('s')
         round     = $round
         mode      = $Mode
+        storage   = $storageMode
         verdict   = $verdict
         critical  = $crit
         important = $imp
@@ -973,6 +1114,7 @@ if ($hadFailing -and $maxRounds -gt 0 -and $consecutive -ge $maxRounds) {
 
 # ---------------------------------------------------------------- 10. 输出
 $exitCode = if ($hadFailing) { 1 } else { 0 }
+Write-RunState 'done' 'done' @{ verdict = $verdict; exitCode = $exitCode; durationSec = $durS; costUsd = $costUsd }
 if ($Json) {
     [Console]::Out.WriteLine(([ordered]@{
                 ok         = $true
@@ -982,6 +1124,7 @@ if ($Json) {
                 minor      = $min
                 round      = $round
                 mode       = $Mode
+                storage    = $storageMode
                 report     = $reportPath
                 markdown   = $mdPath
                 cost_usd   = $costUsd
