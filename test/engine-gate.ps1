@@ -119,11 +119,11 @@ function Remove-TestRepo([string]$repo) {
     }
 }
 
-# 1. 本地账本：干净工作区、无历史 → pass，且不创建 .trellis
+# 1. 本地账本：干净工作区、无历史 → blocked（干净 ≠ 已审核，不能 fail-open）
 $repo = New-TestRepo
 try {
     $result = Invoke-Gate $repo 'auto'
-    Check 'G1 本地无历史/干净 → pass' ($result.exitCode -eq 0 -and $result.json.gate -eq 'pass') $result.raw
+    Check 'G1 本地无历史/干净 → blocked（不能把没跑过当 pass）' ($result.exitCode -eq 1 -and $result.json.gate -eq 'blocked') $result.raw
     Check 'G2 本地模式不创建 .trellis' (-not (Test-Path (Join-Path $repo '.trellis')))
     Check 'G3 本地账本 task.json 已创建' (Test-Path (Join-Path $repo '.dsh/claude-review/ledger/task.json'))
     Check 'G4 gate 结果带 storage=local' ($result.json.storage -eq 'local') $result.raw
@@ -295,7 +295,7 @@ try {
     $out = & pwsh @engineArgs 2>&1
     $json = $null
     try { $json = (@($out | Where-Object { $_.Trim().StartsWith('{') } | Select-Object -Last 1) | Out-String) | ConvertFrom-Json } catch { }
-    Check 'G35 gate 忽略非法 -Base' ($LASTEXITCODE -eq 0 -and $null -ne $json -and $json.gate -eq 'pass') ($out -join "`n")
+    Check 'G35 gate 忽略非法 -Base（不因 Base 参数报错）' ($LASTEXITCODE -ne 2 -and $null -ne $json -and $json.gate -in @('pass', 'blocked')) ($out -join "`n")
 
     $engineArgs = @('-NoProfile', '-File', $engine, '-Mode', 'full', '-Cwd', $repo, '-Storage', 'local', '-Head', 'HEAD', '-DryRun', '-Json')
     $out = & pwsh @engineArgs 2>&1

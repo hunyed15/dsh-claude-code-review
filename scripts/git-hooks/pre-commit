@@ -1,0 +1,32 @@
+#!/bin/sh
+# claude-code-review pre-commit gate.
+# Installed by scripts/install-git-hook.ps1. Bypass (emergency): git commit --no-verify.
+set -eu
+
+ROOT="$(git rev-parse --show-toplevel)"
+ENGINE="${CLAUDE_REVIEW_ENGINE:-__ENGINE__}"
+
+if [ ! -f "$ENGINE" ]; then
+  echo "claude-review: engine not found: $ENGINE (set CLAUDE_REVIEW_ENGINE)" >&2
+  exit 1
+fi
+
+# The gate compares the worktree snapshot. Unstaged changes would make the
+# reviewed worktree differ from what is being committed; require them to be
+# staged or stashed first.
+if ! git diff --quiet; then
+  echo "claude-review: unstaged changes present; git add or stash them before committing" >&2
+  exit 1
+fi
+
+if [ -n "${CLAUDE_REVIEW_TASKDIR:-}" ]; then
+  pwsh -NoProfile -File "$ENGINE" -Mode gate -Cwd "$ROOT" -Storage auto -TaskDir "$CLAUDE_REVIEW_TASKDIR" -Json || {
+    echo "claude-review: gate blocked; run full/range, fix findings, then rerun full (emergency: --no-verify)" >&2
+    exit 1
+  }
+else
+  pwsh -NoProfile -File "$ENGINE" -Mode gate -Cwd "$ROOT" -Storage auto -Json || {
+    echo "claude-review: gate blocked; run full/range, fix findings, then rerun full (emergency: --no-verify)" >&2
+    exit 1
+  }
+fi

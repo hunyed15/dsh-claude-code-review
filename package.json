@@ -20,6 +20,8 @@
     "icon.svg",
     "scripts/Invoke-ClaudeReview.ps1",
     "scripts/acp-review.mjs",
+    "scripts/install-git-hook.ps1",
+    "scripts/git-hooks/pre-commit",
     "scripts/config.json",
     "scripts/review-schema.json",
     "scripts/reviewer-role.md"

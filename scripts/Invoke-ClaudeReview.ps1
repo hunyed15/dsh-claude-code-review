@@ -613,7 +613,7 @@ if ($Mode -eq 'gate') {
         # 且提示的下一步（重跑 full）无法自救。incremental 记录、fix、无记录三类仍然阻断。
         # 与脏分支对称：放行必须同时满足 mode=full、verdict∈{pass,nothing-to-review}、
         # 历史未标记 degraded、且快照与当前一致。否则「干净」可能只是「降级审核后把漏审内容 commit 掉」。
-        $cleanPass = (-not $last) -or (
+        $cleanPass = ($null -ne $last) -and (
             [string]$last.mode -eq 'full' -and
             (@('pass', 'nothing-to-review') -contains [string]$last.verdict) -and
             (-not (($last.PSObject.Properties.Name -contains 'degraded') -and $last.degraded)) -and
@@ -636,7 +636,7 @@ if ($Mode -eq 'gate') {
     }
 
     $reasons = @()
-    if (-not $last) { $reasons += '还有未审改动，且没有任何审核记录' }
+    if (-not $last) { $reasons += '工作区是干净的，但没有任何审核记录；干净不等于已审核，请先跑一次 -Mode full 并通过' }
     else {
         if ([string]$last.mode -ne 'full') { $reasons += "最近一次审核是 $($last.mode) 模式，收尾门禁要求 full" }
         if ([string]$last.verdict -ne 'pass') { $reasons += "最近一次审核结论是 $($last.verdict)" }

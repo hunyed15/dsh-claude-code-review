@@ -113,6 +113,23 @@ plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claud
 - ACP 通过 `session/new` 的 `_meta.claudeCode.options.extraArgs` 透传 `maxBudgetUsd`/`model`/`effort`；未配置时用 Claude settings。需要强制 CLI 用 `transport: cli`。
 - **发布**：把 `package.json` 改成公开包名并去掉 `private` 后发布；依赖会随插件安装自动带上，最终用户仍然只装插件，不需要额外 ACP 安装/配置。
 
+## 提交前门禁与 pre-commit
+
+`-Mode gate` 只验证「最近一次 full/range 已 pass 且快照一致」，不调用模型。**干净工作区本身不是 pass**：从未审核过、只跑过 incremental、上次 fix、快照降级/截断/自定义 Base 都会被拒绝；`nothing-to-review` 只有在完整 full 且记录存在时才视为终态。
+
+推荐在每个仓库安装 Git hook（可选，不自动安装）：
+
+```powershell
+pwsh -NoProfile -File scripts/install-git-hook.ps1 -Cwd <repo> [-EnginePath <engine>] [-Force]
+```
+
+- hook 调 `-Mode gate -Storage auto`；Trellis 可用 `CLAUDE_REVIEW_TASKDIR` 指定任务目录。
+- 引擎路径可用 `CLAUDE_REVIEW_ENGINE` 覆盖；默认写入安装时的引擎绝对路径。
+- hook 要求没有 unstaged 改动（`git diff --quiet`），避免「审的是工作区、提交的是另一份」。
+- 紧急可 `git commit --no-verify`；hook 是本地守卫，不是服务端强制。
+- 新插件已带引擎版本握手（`# claude-review-api: 3`）：目标仓库旧引擎会被跳过并回退自带引擎，`engineWarning` 会显示；如果 `allowBundledFallback: false` 则直接报错。
+- 被审仓库有 `tools/claude-review/` 副本时，**不要改副本**；副本可以镜像上游，但补丁要回上游，config 差异放被审仓库自己的 `config.json`。否则就是两份事实源，插件升级后会再次出现「旧副本不认新参数」。
+
 ## 协同面板（会话内第三个 tab）
 
 在会话顶部「对话｜轨迹」旁边多一个 **协同**（`conversation.view`，`id=collab`，order 20，不替换任何现有 UI）。
@@ -193,7 +210,7 @@ node test/client-smoke.mjs                   # 14 个断言
 node test/acp-smoke.mjs                      # 13 个断言：role/budget extraArgs、只读权限、fs、真实 adapter 启动失败
 ```
 
-- `engine-gate`：在临时 git 仓库里直接跑引擎 gate，覆盖本地无历史/full pass/快照不一致/incremental/fix/history 损坏/无历史有改动、Trellis pass、显式 trellis 缺 `.trellis`、range 提交区间与 dirty/head mismatch 标记、`full -Base`、截断 full pass 不过 gate、自定义 Base 的 full 不冒充收尾门禁、scope 不一致（含 dotfile / Windows 绝对路径 / 跨盘符 / 带空格 / 无扩展名 / 汉字紧贴路径 / 中文文件名正反向）、`-Head` 仅 range、gate 忽略 Base、忽略或已跟踪的本地账本都不导致快照漂移、跟踪的 review 文件不把 range 误判为 dirty、`SessionId → task.py current` 与「无活动任务不猜」。
+- `engine-gate`：在临时 git 仓库里直接跑引擎 gate，覆盖本地无历史/干净 → blocked（不能把没跑过当 pass）、full pass、快照不一致、incremental/fix/history 损坏/无历史有改动、Trellis pass、显式 trellis 缺 `.trellis`、range 提交区间与 dirty/head mismatch 标记、`full -Base`、截断 full pass 不过 gate、自定义 Base 的 full 不冒充收尾门禁、scope 不一致（含 dotfile / Windows 绝对路径 / 跨盘符 / 带空格 / 无扩展名 / 汉字紧贴路径 / 中文文件名正反向）、`-Head` 仅 range、gate 忽略 Base、忽略或已跟踪的本地账本都不导致快照漂移、跟踪的 review 文件不把 range 误判为 dirty、`SessionId → task.py current` 与「无活动任务不猜」。
 - `engine-cache`：用编译的 fake Claude 统计真实调用次数；相同 diff/输入第二次直接 cached（0 次新调用）但会按当前快照落一条零成本 history；中间插入空 diff 轮次会清掉旧 hash，随后相同 full 重新审核，gate 能正常通过。
 - `engine-acp`：用 fake ACP agent（官方 SDK 的 agent 侧）驱动引擎 `-Transport acp` 的 full/gate，断言 `transport=acp`、报告 meta、gate 可通过；另覆盖含空格 cwd、auto→CLI、ACP 超时 fail-closed、adapter 启动即崩、bridge 启动超时仍回退 CLI 并带 `transportWarning`；不调用真实模型。
 - `acp-smoke`：真实 `scripts/acp-review.mjs` + 官方 SDK + fake ACP agent，断言初始化/会话/消息/结果 envelope，reviewer role 走 `session/new` 的 systemPrompt、read 允许、edit 拒绝、fs 读 line/limit、fs 写拒绝、启动失败 exit 3；并用**真实 adapter 入口**（缺 `CLAUDE_CODE_EXECUTABLE`）断言启动失败被归类为 exit 3。
