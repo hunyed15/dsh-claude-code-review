@@ -1,6 +1,7 @@
 param(
     [string]$Cwd = '',
     [string]$EnginePath = '',
+    [string]$TaskDir = '',
     [switch]$Force
 )
 $ErrorActionPreference = 'Stop'
@@ -31,7 +32,10 @@ if ((Test-Path -LiteralPath $preCommit) -and -not $Force) {
 }
 
 $template = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'git-hooks/pre-commit') -Raw
-$content = $template.Replace('__ENGINE__', $engine.Replace('\', '/'))
+function ConvertTo-ShSingleQuoted([string]$value) {
+    return ([string]$value).Replace('\', '/').Replace("'", "'\''")
+}
+$content = $template.Replace('__ENGINE__', (ConvertTo-ShSingleQuoted $engine)).Replace('__TASKDIR__', (ConvertTo-ShSingleQuoted $TaskDir))
 New-Item -ItemType Directory -Path $hooks -Force | Out-Null
 if (Test-Path -LiteralPath $preCommit) {
     $backup = "$preCommit.bak-" + (Get-Date -Format 'yyyyMMdd-HHmmss')

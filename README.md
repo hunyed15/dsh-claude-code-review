@@ -124,6 +124,7 @@ pwsh -NoProfile -File scripts/install-git-hook.ps1 -Cwd <repo> [-EnginePath <eng
 ```
 
 - hook 调 `-Mode gate -Storage auto`；Trellis 可用 `CLAUDE_REVIEW_TASKDIR` 指定任务目录。
+- 也可以直接在 DSH 会话里调 `claude_review_install_hook`（`cwd`/`force`/`enginePath`/`taskDir`），一键安装；等价于上面的脚本。
 - 引擎路径可用 `CLAUDE_REVIEW_ENGINE` 覆盖；默认写入安装时的引擎绝对路径。
 - hook 要求没有 unstaged 改动（`git diff --quiet`），避免「审的是工作区、提交的是另一份」。
 - 紧急可 `git commit --no-verify`；hook 是本地守卫，不是服务端强制。

@@ -12,6 +12,7 @@
  * the CLI/Trellis workflow and the in-app tool never drift apart.
  */
 import { access, readFile, stat } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -747,8 +748,90 @@ export function apply(ctx, config = {}) {
     },
   }
 
+  // A+：一键安装提交门禁 hook（显式调用，不在插件加载时自动写 .git/hooks）
+  const installHookTool = {
+    name: 'claude_review_install_hook',
+    description:
+      'Install the claude-code-review pre-commit gate hook into a git repository. The hook runs -Mode gate (no model) ' +
+      'and blocks commits unless the latest full/range review passed on the current snapshot. One-click install; never auto-installs.',
+    parameters: {
+      type: 'object',
+      properties: {
+        cwd: { type: 'string', description: 'Git repository. Defaults to the session working directory.' },
+        force: { type: 'boolean', description: 'Replace an existing pre-commit hook (backed up first).' },
+        enginePath: { type: 'string', description: 'Optional engine path written into the hook; defaults to this plugin engine.' },
+        taskDir: { type: 'string', description: 'Optional Trellis task dir baked into the hook as the default CLAUDE_REVIEW_TASKDIR.' },
+      },
+      additionalProperties: false,
+    },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          installed: { type: 'boolean' },
+          enginePath: { type: 'string' },
+          taskDir: { type: 'string' },
+          output: { type: 'string' },
+        },
+        required: ['ok', 'installed'],
+      },
+      render(_args, value) {
+        return [{ type: 'text', text: value?.ok ? `hook 已安装：${value.enginePath}` : '未安装' }]
+      },
+    },
+    timeoutMs: toolTimeoutMs,
+    isConcurrencySafe() {
+      return false
+    },
+    async execute(args, exec) {
+      const options = args ?? {}
+      const cwd = agentCwd(ctx, exec, options.cwd)
+      const installer = join(HERE, 'scripts', 'install-git-hook.ps1')
+      if (!existsSync(installer)) throw new Error(`claude_review_install_hook: 安装器不存在：${installer}`)
+      const engine =
+        typeof options.enginePath === 'string' && options.enginePath.trim() !== ''
+          ? resolve(cwd, options.enginePath)
+          : BUNDLED_ENGINE
+      const taskDir =
+        typeof options.taskDir === 'string' && options.taskDir.trim() !== ''
+          ? resolve(cwd, options.taskDir)
+          : ''
+      const pwsh = await ctx.subprocess.resolveExecutable('pwsh')
+      const argv = [pwsh, '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', installer, '-Cwd', cwd, '-EnginePath', engine]
+      if (taskDir !== '') argv.push('-TaskDir', taskDir)
+      if (options.force === true) argv.push('-Force')
+      const handle = ctx.subprocess.spawn({
+        argv,
+        cwd,
+        stdio: {
+          stdin: 'ignore',
+          stdout: { maxBytes: 1024 * 1024 },
+          stderr: { maxBytes: 256 * 1024 },
+        },
+        graceMs: 5000,
+        signal: exec.signal,
+      })
+      const outcome = await handle.done
+      const stdout = handle.collected.stdout?.readFrom(0)?.text ?? ''
+      const stderr = handle.collected.stderr?.readFrom(0)?.text ?? ''
+      const exitCode = typeof outcome?.exitCode === 'number' ? outcome.exitCode : -1
+      if (exitCode !== 0) {
+        throw new Error(`claude_review_install_hook: 安装失败（exit ${exitCode}）：${firstLine(stderr) || firstLine(stdout) || '无输出'}`)
+      }
+      return {
+        ok: true,
+        installed: true,
+        enginePath: engine,
+        taskDir,
+        output: stdout.trim(),
+      }
+    },
+  }
+
   ctx.effect(() => ctx.tools.register(definition))
   ctx.effect(() => ctx.tools.register(dispositionTool))
+  ctx.effect(() => ctx.tools.register(installHookTool))
 
   // 工具先注册完，再尝试可选的协同面板：
   //  1) 首选 ctx.inject(['webServer'], cb)：cordis 保证服务就绪后才回调。
