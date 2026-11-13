@@ -175,6 +175,26 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
   check('A8 Storage 透传', line.includes("-Storage 'auto'"), line.slice(0, 260))
 }
 
+// A9. range / Base / Head 透传
+{
+  const collector = {}
+  const tools = makeCtx(cannedSpawn('{"ok":true,"dryRun":true,"mode":"range"}', 0, collector))
+  const tool = tools.get('claude_review')
+  await tool.execute({ mode: 'range', cwd: REPO, base: 'HEAD~1', head: 'HEAD', dryRun: true }, exec())
+  const line = (collector.argv ?? []).join(' ')
+  check("A9 range/Base/Head 透传", line.includes("-Mode 'range'") && line.includes("-Base 'HEAD~1'") && line.includes("-Head 'HEAD'"), line.slice(0, 300))
+}
+
+// A10. profile 透传
+{
+  const collector = {}
+  const tools = makeCtx(cannedSpawn('{"ok":true,"dryRun":true,"mode":"full"}', 0, collector))
+  const tool = tools.get('claude_review')
+  await tool.execute({ mode: 'full', cwd: REPO, profile: 'deep', dryRun: true }, exec())
+  const line = (collector.argv ?? []).join(' ')
+  check("A10 profile 透传", line.includes("-Profile 'deep'"), line.slice(0, 300))
+}
+
 // B. verdict=fix 必须 ok=false
 {
   const envelope = JSON.stringify({ ok: true, mode: 'full', verdict: 'fix', critical: 1, important: 0, minor: 0, summary: 'x', report: 'r.json' })
@@ -235,6 +255,7 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
 {
   const root = await mkdtemp(join(tmpdir(), 'crc-disp-'))
   const reviewDir = join(root, '.trellis', 'tasks', '11-12-demo', 'review')
+  const taskDir = join(root, '.trellis', 'tasks', '11-12-demo')
   await mkdir(reviewDir, { recursive: true })
   await writeFile(join(root, '.trellis', 'tasks', '11-12-demo', 'task.json'), JSON.stringify({ id: 'demo', title: '演示', status: 'in_progress' }))
   const tools = makeCtx(cannedSpawn('{}', 0))
@@ -244,6 +265,7 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
   const batch = await tool.execute(
     {
       cwd: root,
+      taskDir,
       entries: [
         { round: 3, key: 'aaa1', status: 'fixed', note: '已修空指针' },
         { round: 3, index: 2, status: 'deferred', note: '设计如此，下一版再说' },
@@ -258,7 +280,7 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
   check('G3 记录带 sessionId', parsed.sessionId === 'session-abc')
   check('G4 记录带 status', parsed.status === 'fixed')
 
-  const single = await tool.execute({ cwd: root, round: 3, key: 'bbb2', status: 'counter-evidence' }, exec())
+  const single = await tool.execute({ cwd: root, taskDir, round: 3, key: 'bbb2', status: 'counter-evidence' }, exec())
   check('G5 单条写入', single.written === 1, JSON.stringify(single))
 
   let rejected = ''
@@ -283,6 +305,42 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
   const rows = (await readFile(join(root, '.dsh', 'claude-review', 'ledger', 'review', 'dispositions.jsonl'), 'utf8')).trim().split('\n')
   check('O3 本地处置落盘', rows.length === 1 && JSON.parse(rows[0]).key === 'aaa')
   await rm(root, { recursive: true, force: true })
+}
+
+// P. 目标仓库旧引擎：没有 claude-review-api 标记时必须回退自带引擎并给出可见 warning
+{
+  const root = await mkdtemp(join(tmpdir(), 'crc-old-engine-'))
+  const engineDir = join(root, 'tools', 'claude-review')
+  await mkdir(engineDir, { recursive: true })
+  await writeFile(join(engineDir, 'Invoke-ClaudeReview.ps1'), "param([string]$Mode = 'full')\n")
+  const envelope = JSON.stringify({ ok: true, dryRun: true, mode: 'full', storage: 'local', files: 1, diffChars: 10 })
+  const tool = makeCtx(cannedSpawn(envelope, 0)).get('claude_review')
+  const result = await tool.execute({ mode: 'full', cwd: root, dryRun: true }, exec())
+  check('P1 旧目标引擎回退自带引擎', result.engineSource === 'bundled', JSON.stringify(result))
+  check('P2 回退 warning 可见', String(result.note).includes('回退') || String(result.engineWarning).includes('回退'), String(result.note))
+  await rm(root, { recursive: true, force: true })
+}
+
+// Q. 完全相同输入的缓存结果：cached=true，成本 0
+{
+  const envelope = JSON.stringify({
+    ok: true,
+    cached: true,
+    verdict: 'pass',
+    mode: 'full',
+    critical: 0,
+    important: 0,
+    minor: 0,
+    round: 1,
+    report: 'r.json',
+    cost_usd: 0,
+    note: '复用与上次完全相同的 diff/输入，未调用模型',
+  })
+  const tool = makeCtx(cannedSpawn(envelope, 0)).get('claude_review')
+  const result = await tool.execute({ mode: 'full', cwd: REPO }, exec())
+  check('Q1 cached=true', result.cached === true)
+  check('Q2 cached 成本为 0', result.costUsd === 0)
+  check('Q3 cached 说明可见', String(result.note).includes('复用'), String(result.note))
 }
 
 // H. 可选：真实 spawn（沙箱内 EPERM 记 SKIP）；用临时 git 仓库，不依赖包所在布局

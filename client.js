@@ -224,7 +224,7 @@ window.__ModuleLoader__.load({
       document.head.appendChild(tag)
     }
 
-    const MODE_LABEL = { incremental: '增量', full: '全量', gate: '门禁' }
+    const MODE_LABEL = { incremental: '增量', full: '全量', gate: '门禁', range: '范围' }
     const VERDICT_META = {
       pass: ['通过', 'ok'],
       fix: ['需修', 'bad'],
@@ -628,6 +628,7 @@ window.__ModuleLoader__.load({
             h('span', { className: 'crc-round-no' }, `#${round.round}`),
             h(Pill, { tone: verdict[1], title: `结论 ${round.verdict || '未知'}` }, verdict[0]),
             h('span', { className: 'crc-round-mode', title: `模式 ${round.mode || '未知'}` }, modeLabel(round.mode)),
+            round.truncated ? h(Pill, { tone: 'bad', title: 'diff 被截断，结论不完整' }, '截断') : null,
             h(
               'span',
               { className: 'crc-round-counts' },

@@ -27,26 +27,35 @@ plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claud
 
 | 参数 | 说明 |
 | --- | --- |
-| `mode` | `incremental`（默认，自上次审核快照以来的改动）/ `full`（相对 HEAD 的全部未提交改动）/ `gate`（本地门禁判定，不调模型） |
-| `description` | 这轮做了什么，直接影响审核质量 |
+| `mode` | `incremental`（默认，自上次审核快照以来的改动）/ `full`（相对 HEAD 的全部未提交改动，可配 `base`）/ `gate`（本地门禁判定，不调模型）/ `range`（已提交区间 `base..head`，不再需要 soft reset） |
+| `base` | 可选 git revision；`range` 必填，`full/incremental` 可选（例如 `HEAD~1`）；`gate` 忽略它 |
+| `head` | 可选 git revision；**只用于 `range`**（默认 `HEAD`）；`full/incremental/gate` 传了会明确报错 |
+| `description` | 这轮做了什么，直接影响审核质量；提到的文件必须至少有一个出现在 diff 里（`strictScope` 默认开） |
 | `checks` | 已执行的客观检查，例如 `["cargo test 12/12 通过"]` |
 | `paths` | 可选的 git pathspec，收窄范围（`gate` 会忽略它） |
 | `focus` | 额外侧重，例如「重点看前后端契约一致性」 |
-| `taskDir` | 报告目录（Trellis 任务目录），留空由引擎自行解析 |
+| `taskDir` | 报告目录（Trellis 任务目录）；Trellis 下没有当前任务时**必须显式传**，引擎不再按 history 猜 |
+| `profile` | `quick`（low effort + 40k diff 上限）/ `deep`（high effort + 200k diff 上限）；显式 `effort/maxDiffChars` 优先 |
 | `cwd` | 要审的仓库，默认当前会话工作目录 |
 | `dryRun` | 只组装输入、不调模型 |
 
-返回：`ok / mode / storage / verdict / critical / important / minor / summary / reportPath / markdownPath / costUsd / exitCode / escalated / note`。
-`verdict` 为 `fix` 或 `gate-blocked` 时 `ok=false`，`note` 会写明「必须先修，再重跑同一模式」。
+返回：`ok / mode / storage / base / head / profile / verdict / critical / important / minor / summary / reportPath / markdownPath / costUsd / truncated / scopeWarning / cached / exitCode / escalated / note / enginePath / engineSource / engineWarning`。
+`verdict` 为 `fix` 或 `gate-blocked` 时 `ok=false`，`note` 会写明「必须先修，再重跑同一模式」；`cached=true` 表示命中了完全相同输入的缓存，没有调用模型。
 
-## 引擎解析顺序
+## 引擎解析顺序与版本握手
 
 1. 插件配置 `enginePath`（`cordis.patch.yml` 里的 `config.enginePath`）
-2. `<cwd>/tools/claude-review/Invoke-ClaudeReview.ps1`（**被审仓库自己的引擎，优先**）
+2. `<cwd>/tools/claude-review/Invoke-ClaudeReview.ps1`
 3. `<cwd>/.dsh/claude-review/Invoke-ClaudeReview.ps1`
 4. 插件自带的 `scripts/Invoke-ClaudeReview.ps1`（跨仓库兜底，可用 `allowBundledFallback: false` 关掉）
 
-自带副本是发布时的快照；被审仓库有第 2/3 条引擎时始终以它为准，所以升级被审仓库的引擎不用重装插件。**本插件仓库没有 `tools/claude-review/`，默认就走第 4 条自带副本。**
+每个候选引擎先读文件头的 `# claude-review-api: 2`：
+
+- 有标记 → 使用该引擎；
+- 标记缺失/版本过低 → 跳过，并回退到自带引擎；结果里带 `engineWarning`，工具 `note` 会显示；
+- `enginePath` 显式配置且 `allowBundledFallback: false` 时，版本不符直接报错，不会静默换引擎。
+
+引擎也支持 `pwsh -File scripts/Invoke-ClaudeReview.ps1 -Capabilities`，直接输出 `{api:2, storage, base, range, truncatedGate, profiles}`。旧版目标引擎没有这些参数时，插件会给出明确的「接口版本不符」而不是把参数绑定错误伪装成「模型输出不可解析」。
 
 ## 审核账本（Trellis / 本地）
 
@@ -58,17 +67,29 @@ plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claud
 
 **配置源只有一处**：插件调用以 `cordis.patch.yml` 的 `storage` 为准；直接 CLI 用 `-Storage`（默认 `auto`）。`scripts/config.json` 不再提供 `storage` 键，避免两套配置静默路由到不同账本。
 
-- 本地账本写入 `task.json`（title = 仓库名）、`review/history.jsonl`、`review-N.json/.md`、`state.json`、`dispositions.jsonl`、`run.json`。
-- 本地账本默认被**引擎的 diff/快照**排除，所以不会把审核产物混进下一轮审核；本仓库的 `.gitignore` 也忽略了它。目标仓库如果不想提交账本，请把 `.dsh/claude-review/ledger/` 加进它自己的 `.gitignore`。
-- `claude_review` / `claude_review_disposition` / 协同面板使用同一套 storage 解析，所以非 Trellis 仓库也有完整轮次、门禁和处置链路。
+**Trellis 任务解析（不猜）**：
+
+- 显式 `taskDir` 最优先；
+- 插件把 DSH session id 传给引擎，引擎用 `DSH_SESSION_ID` 调 `task.py current`，只接受真正的当前任务；
+- 没有当前任务就 **exit 2**，提示传 `taskDir`；**不会**再按 `review/history.jsonl` 最新修改或 `in_progress` 状态猜任务（猜错会连带用错 diff 基线和账本）；
+- 本地 storage 不需要任务。
+
+- 本地账本写入 `task.json`（title = 仓库名）、`review/history.jsonl`、`review-N.json/.md`、`state.json`、`dispositions.jsonl`、`run.json`；引擎会在账本目录写 `.gitignore`（`*`）自忽略，避免 `git add`/快照把审核产物带进来。
+- 本地账本默认被**引擎的 diff**排除，且账本自忽略；本仓库的 `.gitignore` 也忽略了它。目标仓库不需要额外配置，`git status` 不会显示账本。
+- `claude_review` / `claude_review_disposition` / 协同面板使用同一套 storage 解析；`claude_review_disposition` 在 Trellis 下必须显式传 `taskDir`（面板不持有 DSH 会话身份，不会猜）。
 
 ## 平台与依赖
 
 - Windows + PowerShell 7（`pwsh`），通过 `ctx.subprocess` 调度，遵守 Host 的进程与沙箱约束。
 - 需要本地 `claude` CLI 已安装并可用（引擎自己解析可执行文件；可在本插件的 `scripts/config.json`，或被审仓库的 `tools/claude-review/config.json` 里固定 `claudeExe`）。
-- 本机沙箱下审核进程通常只有 `Read` 可用（`Grep`/`Glob`/`Bash` 被拒），引擎会把 diff 与改动文件清单内联进简报。
+- 本机沙箱下审核进程通常只有 `Read` 可用（`Grep`/`Glob` 也可能被拒；`Bash` 不开放），引擎会把 diff 与改动文件清单内联进简报。
 - 审核进程只开放 `Read` / `Grep` / `Glob`；**不开放 Bash**，`Write/Edit/NotebookEdit` 也禁用。只读由工具层强制，不依赖提示词。
 - 引擎自带通用 reviewer role（`scripts/reviewer-role.md`）；项目自己的 `.trellis/agents/review.md` 存在时会合并进去。Trellis 模式还会把 `.trellis/spec/**/index.md` 路径列进简报，让审核员按需读取。
+- **截断 fail-closed**：`maxDiffChars` 默认 200000；超出时报告/history/面板都带 `truncated`，**截断的 full pass 不能过 gate**（`allowTruncatedGate: true` 可显式放行）。调大上限或缩窄 `paths` 后重跑。
+- **scope preflight**：`strictScope` 默认 `true`；`description`/`focus` 里提到的、仓库中真实存在的文件，必须至少有一个出现在 diff 里，否则 exit 2。确认是有意为之可设 `strictScope: false` 或加 `-NoStrictScope`。
+- **profile / 缓存**：`quick` 低 effort + 40k，`deep` high effort + 200k；完全相同 diff + 相同输入 + 相同上下文文件（本地 REVIEW.md/AGENTS/CLAUDE/CONTRIBUTING、Trellis 任务产物/spec、role/schema/引擎/config/Claude settings、range 工作区树）会命中缓存，0 次模型调用；命中时仍按**当前快照**追加一条零成本 history（面板/门禁能看到当前 full pass），空 diff 轮次会清掉旧 hash，避免拿 `nothing-to-review` 冒充缓存结果。**不做**“未变文件沿用上轮结论”的跨文件缓存。
+- **range 的 Read 语义**：diff 是 base..head 提交区间，但审核员用 `Read` 看到的是**当前工作区**。工作区 dirty 或 `-Head != HEAD` 时，简报会明确警告“以 diff 为准”，且缓存键包含工作区树；需要严格按提交内容审时，先确保工作区干净。
+- **自定义 Base 不是收尾门禁**：`full -Base HEAD~1` 适合评已提交区间；门禁只认不带 `-Base` 的普通 `full`，否则可以绕开完整范围。`range` 本身也不满足收尾门禁。
 
 ## 协同面板（会话内第三个 tab）
 
@@ -76,7 +97,7 @@ plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claud
 
 显示内容（全部只读）：
 
-- **审核轮次时间线**：本项目**所有会话**的轮次（#round / 模式 / verdict / 分级计数 / 会话 id 短号 / 时间 / 成本），点开看每条问题的 `why`、`fix`、`key`、生命周期与处置徽章；
+- **审核轮次时间线**：本项目**所有会话**的轮次（#round / 模式（含范围 range） / verdict / 分级计数 / 会话 id 短号 / 时间 / 成本），点开看每条问题的 `why`、`fix`、`key`、生命周期与处置徽章；被截断的轮次显示「截断」；
 - **下一步**：由最近一轮和门禁推导唯一动作（跑第一次审核 / 修 N 条必修 / 补 full / 跑 gate / 处理阻断）；
 - **项目任务切换**：右侧列出项目里的任务及其门禁/待修/最近轮次，点击切换当前任务详情；
 - **问题 → 修复结果**：生命周期（新发现 / 仍存在 / 已修复 / 复发 / 未复检）+ 显式处置（已修 / 已反证 / 暂缓）；
@@ -110,16 +131,18 @@ Host 路由（本插件注册的 webServer resource）
 
 ### 问题生命周期
 
-按稳定 `key` 跨轮推导，独立于显式处置（两者都展示）：
+按 `key` + 语义相似度跨轮推导，独立于显式处置（两者都展示）：
 
 | 徽章 | 判定 |
 | --- | --- |
-| 新发现 | 该 key 首次出现的轮次 |
-| 仍存在 | 该 key 在后续轮次继续出现 |
+| 新发现 | 该问题簇首次出现的轮次 |
+| 仍存在 | 该问题簇在后续轮次继续出现 |
 | 已修复 | 最后一次出现之后，有一轮「真正跑过模型」的审核不再包含它 |
 | 复发 | 中间有审核轮次不含它，之后又出现 |
 | 未复检 | 只出现过一次，后面没有可对照的审核轮次 |
-| — | 没有 key 的旧数据，退回 disposition 推断 |
+| — | 极端旧数据（没有 file/severity/key）才退回 disposition 推断 |
+
+> 归并规则：先按 `key` 精确匹配；key 对不上时，按 `file + severity + issue 文本相似度 ≥0.4` 归并。审核员换措辞导致 key 变化时仍算同一问题；同文件但文本差异大的问题不会被误并。keyless 旧数据也参与模糊聚类。
 
 > “真正跑过模型”指有 `review-N.json` 且不是 `nothing-to-review`；代码没变、没人复检的轮次不会把问题判成已修复。
 
@@ -127,7 +150,7 @@ Host 路由（本插件注册的 webServer resource）
 
 > 复检推断只认「有 `review-N.json` 且不是 `nothing-to-review`」的下一轮：下一轮干净 `pass`（issues 为空）也算已复检，判为「视为已修（推断）」，备注会带上轮次与模式；如果后面只有 `nothing-to-review`，说明代码没变、没人复检，保持「未复检」。
 
-> 门禁状态是**面板口径**：只看最近一轮历史（mode/verdict/degraded），不校验「审核后工作区是否又变了」。提交前必须跑 `claude_review(mode:"gate")` 复核。
+> 门禁状态是**面板口径**：看最近一轮历史（mode/verdict/degraded/truncated），不校验“审核后工作区是否又变了”。截断的 full pass 在面板显示 blocked；`range` 也不满足收尾门禁（需要 full）。提交前必须跑 `claude_review(mode:"gate")` 复核。
 
 ### 注意
 
@@ -139,15 +162,17 @@ Host 路由（本插件注册的 webServer resource）
 在本包目录运行（不调用模型）：
 
 ```powershell
-pwsh -NoProfile -File test/engine-gate.ps1   # 17 个断言：gate 快照/历史/本地/ Trellis
-node test/tool-smoke.mjs                     # 52 个断言，约 10 秒
-node test/panel-smoke.mjs                    # 48 个断言（真实仓库断言可选，见下）
+pwsh -NoProfile -File test/engine-gate.ps1   # 54 个断言：gate 快照/历史/本地/Trellis、range、截断、scope、任务解析
+pwsh -NoProfile -File test/engine-cache.ps1  # 8 个断言：fake Claude 验证缓存、空 diff 清 hash、gate 可解锁
+node test/tool-smoke.mjs                     # 59 个断言，约 10 秒
+node test/panel-smoke.mjs                    # 62 个断言（真实仓库断言可选，见下）
 node test/client-smoke.mjs                   # 11 个断言
 ```
 
-- `engine-gate`：在临时 git 仓库里直接跑引擎 gate，覆盖本地无历史/full pass/快照不一致/incremental/fix/history 损坏/无历史有改动、Trellis pass、显式 trellis 缺 `.trellis`，并断言本地模式不创建 `.trellis`。
-- `tool-smoke`：命令行构造（含 `-Storage`）、`fix`/`gate-blocked` 必须 `ok=false`、`exit 2` 必须抛错、`dryRun` 透传、引擎缺失可诊断、Trellis/本地处置写入，以及面板路由的授权/冷启动重试/大小写比较/本地模式。
-- `panel-smoke`：问题匹配、轮次聚合、处置叠加、生命周期（new/still/fixed/reopened）、下一步动作、任务切换、Trellis 与本地账本、`nothing-to-review` 语义。真实仓库断言用 `CLAUDE_REVIEW_REPO=<Trellis 仓库>` 指定；未指定且包不在 Trellis 仓库内时记 SKIP。
+- `engine-gate`：在临时 git 仓库里直接跑引擎 gate，覆盖本地无历史/full pass/快照不一致/incremental/fix/history 损坏/无历史有改动、Trellis pass、显式 trellis 缺 `.trellis`、range 提交区间与 dirty/head mismatch 标记、`full -Base`、截断 full pass 不过 gate、自定义 Base 的 full 不冒充收尾门禁、scope 不一致（含 dotfile / Windows 绝对路径 / 跨盘符 / 带空格 / 无扩展名 / 汉字紧贴路径 / 中文文件名正反向）、`-Head` 仅 range、gate 忽略 Base、忽略或已跟踪的本地账本都不导致快照漂移、跟踪的 review 文件不把 range 误判为 dirty、`SessionId → task.py current` 与「无活动任务不猜」。
+- `engine-cache`：用编译的 fake Claude 统计真实调用次数；相同 diff/输入第二次直接 cached（0 次新调用）但会按当前快照落一条零成本 history；中间插入空 diff 轮次会清掉旧 hash，随后相同 full 重新审核，gate 能正常通过。
+- `tool-smoke`：命令行构造（含 `-Storage`/`-Base`/`-Head`/`-Profile`）、`fix`/`gate-blocked` 必须 `ok=false`、`exit 2` 必须抛错、`dryRun` 透传、旧引擎回退、缓存结果、引擎缺失可诊断、Trellis/本地处置写入，以及面板路由的授权/冷启动重试/大小写比较/本地模式。
+- `panel-smoke`：问题匹配、轮次聚合、处置叠加、生命周期（new/still/fixed/reopened/unreviewed + 换措辞聚类 + 空 file 无 key 保持 unknown / 有 key 仍跟踪）、下一步动作（含 range、截断/自定义 Base/快照降级在 pass 与 nothing-to-review 两种状态下都重跑 full）、截断门禁、任务切换、Trellis 与本地账本、`nothing-to-review` 语义。真实仓库断言用 `CLAUDE_REVIEW_REPO=<Trellis 仓库>` 指定；未指定且包不在 Trellis 仓库内时记 SKIP。
 - `client-smoke`：静态检查客户端注入、`conversation.view` 注册、原生 style 注入与路由访问边界。
 
 「真实 spawn 引擎跑一次 gate」在受限沙箱内可能被拒（Node 管道 spawn `EPERM`，已知边界），此时该用例记 SKIP；在沙箱外/危险全权限下会真正执行。

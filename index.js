@@ -11,7 +11,7 @@
  * normalizes the JSON envelope into the tool result. Keeping one engine means
  * the CLI/Trellis workflow and the in-app tool never drift apart.
  */
-import { access, stat } from 'node:fs/promises'
+import { access, readFile, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -86,21 +86,78 @@ function storageMode(config) {
   return ['auto', 'trellis', 'local'].includes(config?.storage) ? config.storage : 'auto'
 }
 
+// 引擎能力握手：文件头 `# claude-review-api: 2` 是静态标记，避免每次审核多 spawn 一次探测。
+// 旧目标仓库（例如 tools/claude-review 里的旧脚本）没有这个标记，插件必须回退自带引擎，
+// 否则新插件传 -Storage 会在旧脚本的参数绑定阶段直接失败。
+const ENGINE_API = 2
+const ENGINE_API_RE = /#\s*claude-review-api:\s*(\d+)/
+const engineApiCache = new Map()
+
+async function readEngineApi(engine) {
+  let info
+  try { info = await stat(engine) } catch { return 0 }
+  const key = `${engine}|${info.mtimeMs}|${info.size}`
+  if (engineApiCache.has(key)) return engineApiCache.get(key)
+  let api = 0
+  try {
+    const text = await readFile(engine, 'utf8')
+    const match = text.slice(0, 4096).match(ENGINE_API_RE)
+    if (match) api = Number(match[1])
+  } catch {
+    api = 0
+  }
+  engineApiCache.set(key, api)
+  return api
+}
+
 async function resolveEngine(ctx, cwd, config) {
   const configured = typeof config.enginePath === 'string' ? config.enginePath.trim() : ''
+  const candidates = []
   if (configured !== '') {
-    const candidate = isAbsolute(configured) ? configured : resolve(cwd, configured)
-    if (await exists(candidate)) return candidate
-    throw new Error(`claude_review: 配置的 enginePath 不存在：${candidate}`)
+    candidates.push({ path: isAbsolute(configured) ? configured : resolve(cwd, configured), source: 'configured' })
+    if (config.allowBundledFallback !== false) {
+      candidates.push({ path: BUNDLED_ENGINE, source: 'bundled' })
+    }
+  } else {
+    candidates.push({ path: join(cwd, WORKSPACE_ENGINE), source: 'workspace' })
+    candidates.push({ path: join(cwd, ALT_WORKSPACE_ENGINE), source: 'local-engine' })
+    if (config.allowBundledFallback !== false) {
+      candidates.push({ path: BUNDLED_ENGINE, source: 'bundled' })
+    }
   }
-  for (const rel of [WORKSPACE_ENGINE, ALT_WORKSPACE_ENGINE]) {
-    const candidate = join(cwd, rel)
-    if (await exists(candidate)) return candidate
+
+  let fallbackReason = ''
+  let firstMissing = ''
+  const sourceLabel = (source) =>
+    ({ configured: '配置的', workspace: '目标仓库', 'local-engine': '目标仓库 .dsh 的', bundled: '插件自带的' })[source] || source
+  for (const candidate of candidates) {
+    if (!(await exists(candidate.path))) {
+      if (candidate.source === 'configured') {
+        throw new Error(`claude_review: 配置的 enginePath 不存在：${candidate.path}`)
+      }
+      if (firstMissing === '') firstMissing = candidate.path
+      continue
+    }
+    const api = await readEngineApi(candidate.path)
+    if (api >= ENGINE_API) {
+      const warning = fallbackReason
+        ? `${fallbackReason}；已回退到${sourceLabel(candidate.source)}引擎 ${candidate.path}。`
+        : ''
+      return { path: candidate.path, source: candidate.source, warning }
+    }
+    const reason =
+      `${candidate.path} 的接口版本为 ${api > 0 ? `v${api}` : '未知（没有 claude-review-api 标记）'}，` +
+      `当前插件需要 v${ENGINE_API}`
+    if (fallbackReason === '') fallbackReason = reason
+    if (candidate.source === 'configured' && config.allowBundledFallback === false) {
+      throw new Error(`claude_review: ${reason}；allowBundledFallback=false，无法回退。请升级该引擎或修改 enginePath。`)
+    }
   }
-  if (config.allowBundledFallback !== false && (await exists(BUNDLED_ENGINE))) return BUNDLED_ENGINE
+
+  const hint = firstMissing ? `（也找不到 ${firstMissing}）` : ''
   throw new Error(
-    `claude_review: 在 ${cwd} 下找不到审核引擎（期望 ${WORKSPACE_ENGINE}）。` +
-      '请在仓库里放置引擎，或在插件配置里设置 enginePath。',
+    `claude_review: 找不到审核引擎${hint}。目标引擎接口过旧或缺失，且自带引擎不可用；` +
+      '请升级目标仓库的 Invoke-ClaudeReview.ps1，或在插件配置里设置 enginePath。',
   )
 }
 
@@ -116,6 +173,15 @@ function lastJsonLine(text) {
   return undefined
 }
 
+function firstLine(text) {
+  return (
+    String(text ?? '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line !== '') ?? ''
+  )
+}
+
 function normalizedResult(envelope, exitCode) {
   const base = {
     ok: envelope?.ok !== false,
@@ -128,11 +194,17 @@ function normalizedResult(envelope, exitCode) {
     reportPath: String(envelope?.report ?? ''),
     markdownPath: String(envelope?.markdown ?? ''),
     storage: String(envelope?.storage ?? ''),
+    base: String(envelope?.base ?? ''),
+    head: String(envelope?.head ?? ''),
+    profile: String(envelope?.profile ?? ''),
+    truncated: envelope?.truncated === true,
+    scopeWarning: String(envelope?.scopeWarning ?? ''),
+    cached: envelope?.cached === true,
     costUsd: typeof envelope?.cost_usd === 'number' ? envelope.cost_usd : 0,
     exitCode,
     dryRun: envelope?.dryRun === true,
     escalated: String(envelope?.escalate ?? ''),
-    note: '',
+    note: String(envelope?.note ?? ''),
   }
   if (base.dryRun) {
     base.verdict = 'dry-run'
@@ -171,6 +243,9 @@ function renderSummary(value) {
     if (result.note) lines.push(`note: ${result.note}`)
     if (result.reportPath) lines.push(`report: ${result.reportPath}`)
   }
+  if (result.truncated) lines.push('truncated: diff 已截断，结论不完整；gate 不会通过')
+  if (result.cached) lines.push('cached: 复用与上次完全相同的 diff/输入，未调用模型')
+  if (result.scopeWarning) lines.push(`scope: ${result.scopeWarning}`)
   if (result.escalated) lines.push(`escalate: ${result.escalated}`)
   return lines.join('\n')
 }
@@ -239,18 +314,31 @@ export function apply(ctx, config = {}) {
     name: 'claude_review',
     description:
       'Run an independent, read-only code review of the current workspace with the local Claude Code CLI. ' +
-      'Use it after each implementation round ("incremental"), before composing commits ("full"), and for the ' +
-      'local submit gate ("gate"). The reviewer cannot modify files; it returns graded findings (critical / ' +
-      'important / minor) with file:line evidence, and the tool fails when the gate blocks.',
+      'Use it after each implementation round ("incremental"), before composing commits ("full"), for an already ' +
+      'committed range ("range"), and for the local submit gate ("gate"). The reviewer cannot modify files; it ' +
+      'returns graded findings (critical / important / minor) with file:line evidence, and the tool fails when the gate blocks.',
     parameters: {
       type: 'object',
       properties: {
         mode: {
           type: 'string',
-          enum: ['incremental', 'full', 'gate'],
+          enum: ['incremental', 'full', 'gate', 'range'],
           description:
-            'incremental = changes since the previous review snapshot; full = all uncommitted changes vs HEAD; ' +
-            'gate = local submit-gate check without calling the model.',
+            'incremental = changes since the previous review snapshot; full = all uncommitted changes vs HEAD ' +
+            '(or vs base when provided); range = committed range base..head; gate = local submit-gate check without calling the model.',
+        },
+        base: {
+          type: 'string',
+          description: 'Optional git revision to use as diff base (e.g. HEAD~1). Required for range mode.',
+        },
+        head: {
+          type: 'string',
+          description: 'Optional git revision to use as range head (default HEAD). Only used by range mode.',
+        },
+        profile: {
+          type: 'string',
+          enum: ['quick', 'deep'],
+          description: 'quick = low effort + 40k diff cap; deep = high effort + 200k diff cap. Explicit effort/maxDiffChars win.',
         },
         description: {
           type: 'string',
@@ -272,7 +360,8 @@ export function apply(ctx, config = {}) {
         },
         taskDir: {
           type: 'string',
-          description: 'Optional task directory for reports (Trellis task). Defaults to the engine’s own resolution.',
+          description:
+            'Trellis task directory. Required when the session has no current Trellis task; the engine never guesses from history/in_progress.',
         },
         cwd: {
           type: 'string',
@@ -299,11 +388,20 @@ export function apply(ctx, config = {}) {
           reportPath: { type: 'string' },
           markdownPath: { type: 'string' },
           storage: { type: 'string' },
+          base: { type: 'string' },
+          head: { type: 'string' },
+          profile: { type: 'string' },
+          truncated: { type: 'boolean' },
+          scopeWarning: { type: 'string' },
+          cached: { type: 'boolean' },
           costUsd: { type: 'number' },
           exitCode: { type: 'integer' },
           dryRun: { type: 'boolean' },
           escalated: { type: 'string' },
           note: { type: 'string' },
+          enginePath: { type: 'string' },
+          engineSource: { type: 'string' },
+          engineWarning: { type: 'string' },
         },
         required: ['ok', 'mode', 'verdict', 'exitCode'],
       },
@@ -317,10 +415,11 @@ export function apply(ctx, config = {}) {
     },
     async execute(args, exec) {
       const options = args ?? {}
-      const mode = ['incremental', 'full', 'gate'].includes(options.mode) ? options.mode : 'incremental'
+      const mode = ['incremental', 'full', 'gate', 'range'].includes(options.mode) ? options.mode : 'incremental'
       const storage = storageMode(config)
       const cwd = agentCwd(ctx, exec, options.cwd)
-      const engine = await resolveEngine(ctx, cwd, config)
+      const engineInfo = await resolveEngine(ctx, cwd, config)
+      const engine = engineInfo.path
       const pwsh = await ctx.subprocess.resolveExecutable('pwsh')
 
       const parts = [
@@ -356,6 +455,15 @@ export function apply(ctx, config = {}) {
       }
       if (typeof options.taskDir === 'string' && options.taskDir.trim() !== '') {
         pushValue('-TaskDir', options.taskDir)
+      }
+      if (typeof options.base === 'string' && options.base.trim() !== '') {
+        pushValue('-Base', options.base)
+      }
+      if (typeof options.head === 'string' && options.head.trim() !== '') {
+        pushValue('-Head', options.head)
+      }
+      if (typeof options.profile === 'string' && options.profile.trim() !== '') {
+        pushValue('-Profile', options.profile)
       }
       pushList('-Checks', options.checks)
       pushList('-Paths', options.paths)
@@ -393,24 +501,43 @@ export function apply(ctx, config = {}) {
         )
       }
       const envelope = lastJsonLine(stdout)
+      const enginePrefix = engineInfo.warning ? `${engineInfo.warning} ` : ''
 
       if (exitCode === 2) {
-        const detail = envelope?.error ?? stderr.trim().slice(0, 800) ?? 'unknown failure'
-        throw new Error(`claude_review: 审核未完成（exit 2）：${detail}`)
+        const detail = envelope?.error || firstLine(stderr) || 'unknown failure'
+        throw new Error(`claude_review: ${enginePrefix}审核未完成（exit 2）：${detail}`)
+      }
+      if (envelope === undefined && exitCode !== 0) {
+        // 旧引擎的参数绑定错误会走这里：必须把 stderr 首行透出来，不能伪装成“模型输出坏了”。
+        throw new Error(
+          `claude_review: ${enginePrefix}引擎执行失败（exit ${exitCode}）：${firstLine(stderr) || firstLine(stdout) || '无输出'}`,
+        )
       }
       if (exitCode !== 0 && exitCode !== 1) {
-        throw new Error(`claude_review: 引擎异常退出（exit ${exitCode}）：${stderr.trim().slice(0, 800)}`)
+        throw new Error(`claude_review: ${enginePrefix}引擎异常退出（exit ${exitCode}）：${firstLine(stderr)}`)
       }
       if (envelope === undefined) {
-        throw new Error(`claude_review: 引擎输出不可解析。stdout=${stdout.trim().slice(0, 400)} stderr=${stderr.trim().slice(0, 400)}`)
+        throw new Error(
+          `claude_review: ${enginePrefix}引擎输出不可解析。stdout=${stdout.trim().slice(0, 400)} stderr=${stderr.trim().slice(0, 400)}`,
+        )
       }
 
       const result = normalizedResult(envelope, exitCode)
+      result.enginePath = engineInfo.path
+      result.engineSource = engineInfo.source
+      result.engineWarning = engineInfo.warning
+      if (engineInfo.warning) {
+        result.note = result.note ? `${result.note} ${engineInfo.warning}` : engineInfo.warning
+      }
       if (exitCode === 1) {
-        // Verdict is fix / gate-blocked. Return a structured, clearly-failed result instead of
-        // throwing: the caller keeps the counts and report path, and the render makes the next
-        // required action explicit.
-        result.note = result.note ? `${result.note}（必须先修，再重跑同一模式）` : '必须先修，再重跑同一模式'
+        // fix/reject 需要修；gate-blocked 的「同一模式」是 gate，重跑 gate 会再次阻断。
+        if (result.verdict === 'gate-blocked') {
+          const gateNote = '门禁阻断：按 reasons 处理后重跑 full（截断/自定义 Base/快照降级）；不要直接重跑 gate'
+          result.note = result.note ? `${gateNote}。${result.note}` : gateNote
+        } else {
+          const fixNote = '必须先修，再重跑同一模式'
+          result.note = result.note ? `${result.note}（${fixNote}）` : fixNote
+        }
       }
       return result
     },
@@ -552,7 +679,7 @@ export function apply(ctx, config = {}) {
         status: { type: 'string', enum: ['fixed', 'counter-evidence', 'deferred'], description: 'Single-entry form.' },
         note: { type: 'string', description: 'Single-entry form.' },
         evidence: { type: 'array', items: { type: 'string' }, description: 'Single-entry form.' },
-        taskDir: { type: 'string', description: 'Trellis task directory. Defaults to the latest reviewed task under cwd.' },
+        taskDir: { type: 'string', description: 'Trellis task directory. Required for Trellis writes; no guessing from history/in_progress.' },
         cwd: { type: 'string', description: 'Project root. Defaults to the session working directory.' },
       },
       additionalProperties: false,
@@ -580,7 +707,6 @@ export function apply(ctx, config = {}) {
     async execute(args, exec) {
       const options = args ?? {}
       const cwd = agentCwd(ctx, exec, options.cwd)
-      const taskDir = await resolveTaskDir(cwd, options.taskDir, { storage: storageMode(config) })
       const batch = Array.isArray(options.entries) && options.entries.length > 0 ? options.entries : []
       const single =
         options.round !== undefined || options.key !== undefined || options.index !== undefined
@@ -597,6 +723,7 @@ export function apply(ctx, config = {}) {
           : []
       const entries = batch.length > 0 ? batch : single
       if (entries.length === 0) throw new Error('claude_review_disposition: 需要 entries 数组或单条 round/key/status')
+      const taskDir = await resolveTaskDir(cwd, options.taskDir, { storage: storageMode(config) })
       const written = await appendDispositions(taskDir, entries, String(exec.agent?.id ?? ''))
       return { ok: true, written, taskDir }
     },

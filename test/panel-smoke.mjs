@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { appendDispositions, deriveNextAction, loadPanel, matchFollowUp, textSimilarity } from '../panel.js'
+import { appendDispositions, deriveLifecycles, deriveNextAction, loadPanel, matchFollowUp, resolveTaskDir, textSimilarity } from '../panel.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_DIR = dirname(HERE)
@@ -128,10 +128,109 @@ function check(name, condition, detail) {
   }
   check('C3 非法 status 被拒', rejected.includes('status 必须是'), rejected)
 
+  let strictRejected = ''
+  try {
+    await resolveTaskDir(root)
+  } catch (error) {
+    strictRejected = String(error?.message ?? error)
+  }
+  check('C4 Trellis 无显式 taskDir → 拒绝猜测', strictRejected.includes('taskDir') || strictRejected.includes('TaskDir'), strictRejected)
+  const explicitResolved = await resolveTaskDir(root, taskDir)
+  check('C5 显式 taskDir 可解析', explicitResolved.toLowerCase().includes('11-12-demo'), explicitResolved)
+
   const missing = await loadPanel(join(root, 'not-a-project'))
   check('D1 不存在的项目 → cwd-not-found', missing?.ok === false && missing.error === 'cwd-not-found', JSON.stringify(missing))
 
   await rm(root, { recursive: true, force: true })
+}
+
+// T. 截断/自定义 Base：面板可见，且不能过 gate
+{
+  const root = await mkdtemp(join(tmpdir(), 'crc-trunc-'))
+  const taskDir = join(root, '.trellis', 'tasks', 'trunc')
+  const reviewDir = join(taskDir, 'review')
+  await mkdir(reviewDir, { recursive: true })
+  await writeFile(join(taskDir, 'task.json'), JSON.stringify({ id: 'trunc', name: 'trunc', title: '截断', status: 'in_progress' }))
+  await writeFile(
+    join(reviewDir, 'history.jsonl'),
+    JSON.stringify({
+      at: '2026-11-13T10:00:00',
+      round: 1,
+      mode: 'full',
+      verdict: 'pass',
+      critical: 0,
+      important: 0,
+      minor: 0,
+      files: 1,
+      snapshot: 'x',
+      truncated: true,
+    }) + '\n',
+  )
+  await writeFile(join(reviewDir, 'review-1.json'), JSON.stringify({ meta: { truncated: true, mode: 'full' }, review: { verdict: 'pass', issues: [] } }))
+  const panel = await loadPanel(root)
+  check('T1 轮次带 truncated 标记', panel?.active?.rounds?.[0]?.truncated === true, JSON.stringify(panel?.active?.rounds?.[0]))
+  check(
+    'T2 截断 full pass → gate blocked',
+    panel?.active?.gate?.state === 'blocked' && String(panel.active.gate.reason).includes('截断'),
+    JSON.stringify(panel?.active?.gate),
+  )
+  await rm(root, { recursive: true, force: true })
+}
+
+// U. 自定义 -Base 的 full 不能冒充收尾门禁
+{
+  const root = await mkdtemp(join(tmpdir(), 'crc-basecustom-'))
+  const taskDir = join(root, '.trellis', 'tasks', 'base')
+  const reviewDir = join(taskDir, 'review')
+  await mkdir(reviewDir, { recursive: true })
+  await writeFile(join(taskDir, 'task.json'), JSON.stringify({ id: 'base', name: 'base', title: 'base', status: 'in_progress' }))
+  await writeFile(
+    join(reviewDir, 'history.jsonl'),
+    JSON.stringify({ at: '2026-11-13T10:00:00', round: 1, mode: 'full', verdict: 'pass', critical: 0, important: 0, minor: 0, files: 1, snapshot: 'x', baseCustom: true }) + '\n',
+  )
+  await writeFile(join(reviewDir, 'review-1.json'), JSON.stringify({ meta: { baseCustom: true, mode: 'full' }, review: { verdict: 'pass', issues: [] } }))
+  const panel = await loadPanel(root)
+  check(
+    'U1 full -Base → gate blocked',
+    panel?.active?.gate?.state === 'blocked' && String(panel.active.gate.reason).includes('Base'),
+    JSON.stringify(panel?.active?.gate),
+  )
+  await rm(root, { recursive: true, force: true })
+}
+
+// S. 换措辞但语义相同 → 同一 lifecycle 簇；同文件不同问题 → 不误并
+{
+  const r1 = { round: 1, issues: [{ key: 'aaa', file: 'x.js', severity: 'important', issue: '缺少空值判断，可能崩溃' }] }
+  const r2 = { round: 2, issues: [{ key: 'zzz', file: 'x.js', severity: 'important', issue: '空值判断缺失，可能崩溃' }] }
+  deriveLifecycles([r1, r2], new Set([1, 2]))
+  check(
+    'S1 换措辞仍判 still-there 且 firstRound=1',
+    r2.issues[0]?.lifecycle?.state === 'still-there' && r2.issues[0]?.lifecycle?.firstRound === 1,
+    JSON.stringify(r2.issues[0]?.lifecycle),
+  )
+
+  const r3 = { round: 1, issues: [{ key: 'aaa', file: 'x.js', severity: 'important', issue: '缺少空值判断' }] }
+  const r4 = { round: 2, issues: [{ key: 'bbb', file: 'x.js', severity: 'important', issue: '日志格式错误，缺少字段' }] }
+  deriveLifecycles([r3, r4], new Set([1, 2]))
+  check('S2 同文件不同问题不误并', r4.issues[0]?.lifecycle?.state === 'new', JSON.stringify(r4.issues[0]?.lifecycle))
+
+  const r5 = { round: 1, issues: [{ key: '', file: '', severity: '', issue: '遗留问题 A' }] }
+  const r6 = { round: 2, issues: [{ key: '', file: '', severity: '', issue: '遗留问题 B' }] }
+  deriveLifecycles([r5, r6], new Set([1, 2]))
+  check(
+    'S3 空 file/空 key 的极端旧数据保持 unknown',
+    r5.issues[0]?.lifecycle?.state === 'unknown' && r6.issues[0]?.lifecycle?.state === 'unknown',
+    JSON.stringify([r5.issues[0]?.lifecycle, r6.issues[0]?.lifecycle]),
+  )
+
+  const r7 = { round: 1, issues: [{ key: 'empty-file-key', file: '', severity: 'important', issue: '无文件信息但 key 稳定' }] }
+  const r8 = { round: 2, issues: [{ key: 'empty-file-key', file: '', severity: 'important', issue: '无文件信息但 key 稳定' }] }
+  deriveLifecycles([r7, r8], new Set([1, 2]))
+  check(
+    'S4 空 file 但有 key 仍跨轮跟踪',
+    r8.issues[0]?.lifecycle?.state === 'still-there' && r8.issues[0]?.lifecycle?.firstRound === 1,
+    JSON.stringify(r8.issues[0]?.lifecycle),
+  )
 }
 
 // D. 本地账本：没有 .trellis 也能看板，不要求 Trellis
@@ -271,6 +370,34 @@ function check(name, condition, detail) {
     'G6 incremental nothing-to-review → full',
     deriveNextAction({ rounds: [{ round: 1, verdict: 'nothing-to-review', mode: 'incremental', counts: {} }], gate: { state: 'blocked' } })
       .key === 'full',
+  )
+  check(
+    'G7 range pass + gate blocked → full',
+    deriveNextAction({ rounds: [{ round: 1, verdict: 'pass', mode: 'range', counts: {} }], gate: { state: 'blocked' } }).key === 'full',
+  )
+  check(
+    'G8 truncated full pass → 重跑 full',
+    deriveNextAction({ rounds: [{ round: 1, verdict: 'pass', mode: 'full', counts: {} }], gate: { state: 'blocked', reason: '最近一次审核的 diff 被截断' } }).key ===
+      'full',
+  )
+  check(
+    'G9 自定义 Base full pass → 重跑 full',
+    deriveNextAction({ rounds: [{ round: 1, verdict: 'pass', mode: 'full', counts: {} }], gate: { state: 'blocked', reason: '最近一次 full 使用了自定义 -Base' } })
+      .key === 'full',
+  )
+  check(
+    'G10 nothing-to-review + 快照降级 → 重跑 full',
+    deriveNextAction({
+      rounds: [{ round: 1, verdict: 'nothing-to-review', mode: 'full', counts: {} }],
+      gate: { state: 'blocked', reason: '最近一次审核在快照降级下运行' },
+    }).key === 'full',
+  )
+  check(
+    'G11 nothing-to-review + 自定义 Base → 重跑 full',
+    deriveNextAction({
+      rounds: [{ round: 1, verdict: 'nothing-to-review', mode: 'full', counts: {} }],
+      gate: { state: 'blocked', reason: '最近一次 full 使用了自定义 -Base' },
+    }).key === 'full',
   )
 }
 

@@ -24,7 +24,7 @@ labels: [review, readonly]
 
 调用方可能只放开 `Read`（`Grep`/`Glob` 在部分沙箱下会被拒绝；`Bash` 不开放）。因此：
 
-- 优先依据**内联 diff**；diff 被截断时会给出完整 patch 路径，用 `Read` 分段读取（先读前 300 行，再 `offset`/`limit` 续读）。
+- 优先依据**内联 diff**；diff 被截断时会给出完整 patch 路径，用 `Read` 分段读取（先读前 300 行，再 `offset`/`limit` 续读）。没有读全不得给 `pass`，并在 `assessment` 说明。
 - 需要上下文时用 `Read` 直接打开被改文件；不要因为 Grep 被拒就放弃取证，也不要据此臆测。
 - 工具失败时，在 `assessment` 里写明「受限未验证」，不要把它当成通过的理由。
 

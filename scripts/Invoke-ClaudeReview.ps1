@@ -1,3 +1,4 @@
+# claude-review-api: 2
 <#
 .SYNOPSIS
     DSH × Claude Code 审核回环（Trellis 集成版）。
@@ -15,16 +16,27 @@
     审核员只读：只挂 Read/Grep/Glob，不开放 Bash，禁 Write/Edit，权限提示一律拒绝。
 
 .PARAMETER Mode
-    incremental（默认）| full | gate
+    incremental（默认）| full | gate | range
       incremental : 自上次审核快照以来的改动
-      full        : 相对 HEAD 的全部未提交改动
+      full        : 相对 HEAD（或 -Base）的全部未提交改动
       gate        : 只读本地 state/history，判断「收尾全量审核是否已 pass」，不调模型
+      range       : 评审已提交区间 Base..Head；不再需要 soft reset
 
 .PARAMETER Cwd
     仓库目录，默认当前目录。
 
 .PARAMETER TaskDir
-    Trellis 任务目录。留空则用 `task.py current`；无活跃任务时用 .trellis/tasks/_adhoc。
+    Trellis 任务目录。显式传入最优先；留空时用 DSH_SESSION_ID + task.py current 解析。
+    没有当前任务就 exit 2，不再按 review/history 或 in_progress 猜任务。
+
+.PARAMETER Base
+    diff 基线 revision（例如 HEAD~1）；range 模式必填。
+
+.PARAMETER Head
+    range 模式的终点 revision，默认 HEAD。
+
+.PARAMETER Profile
+    quick（low effort + 40k diff）/ deep（high effort + 200k diff）；显式 Effort/MaxDiffChars 优先。
 
 .PARAMETER Paths
     限定审核范围的 git pathspec（可多个）。留空表示整个仓库。
@@ -45,7 +57,8 @@
     报告目录，默认 <task>/review。
 
 .PARAMETER MaxDiffChars
-    内联进 prompt 的 diff 上限，超出部分写 patch 文件，默认取 config.json（40000）。
+    内联进 prompt 的 diff 上限，超出部分写 patch 文件，默认取 config.json（200000）。
+    截断的 full pass 不能过 gate；会写 truncated 标记。
 
 .PARAMETER TimeoutSec
     单次审核超时，默认取 config.json（当前 1500 秒；网关波动大，别调太小）。
@@ -64,15 +77,25 @@
 
 .EXAMPLE
     pwsh -NoProfile -File tools/claude-review/Invoke-ClaudeReview.ps1 -Mode gate
+
+.EXAMPLE
+    pwsh -NoProfile -File tools/claude-review/Invoke-ClaudeReview.ps1 -Mode range -Base HEAD~2 -Head HEAD
+
+.EXAMPLE
+    pwsh -NoProfile -File scripts/Invoke-ClaudeReview.ps1 -Capabilities
 #>
 [CmdletBinding()]
 param(
-    [ValidateSet('incremental', 'full', 'gate')]
+    [ValidateSet('incremental', 'full', 'gate', 'range')]
     [string]$Mode = 'incremental',
     [string]$Cwd = '',
     [ValidateSet('auto', 'trellis', 'local')]
     [string]$Storage = 'auto',
     [string]$TaskDir = '',
+    [string]$Base = '',
+    [string]$Head = '',
+    [ValidateSet('', 'quick', 'deep')]
+    [string]$Profile = '',
     [string[]]$Paths = @(),
     [string]$Description = '',
     [string]$Requirements = '',
@@ -87,6 +110,8 @@ param(
     [int]$TimeoutSec = 0,
     [switch]$DryRun,
     [switch]$Json,
+    [switch]$Capabilities,
+    [switch]$NoStrictScope,
     [switch]$Help
 )
 
@@ -119,6 +144,21 @@ if ($Help) {
     exit 0
 }
 
+# 能力握手：插件先读文件头的 claude-review-api 标记；这里同时提供可执行探测。
+# 必须在任何路径/配置/账本检查之前返回，保证旧仓库里的引擎不会因为 Cwd 不存在而误判。
+if ($Capabilities) {
+    [Console]::Out.WriteLine(([ordered]@{
+                api           = 2
+                name          = 'claude-code-review'
+                storage       = @('auto', 'trellis', 'local')
+                base          = $true
+                range         = $true
+                truncatedGate = $true
+                profiles      = @('quick', 'deep')
+            } | ConvertTo-Json -Compress))
+    exit 0
+}
+
 # ---------------------------------------------------------------- 0. 路径与配置
 $scriptRoot = $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($Cwd)) { $Cwd = (Get-Location).Path }
@@ -137,9 +177,11 @@ $cfg = @{
     model            = ''
     effort           = 'low'
     timeoutSec       = 600
-    maxDiffChars     = 40000
+    maxDiffChars     = 200000
     maxRounds        = 3
     failOn           = @('critical', 'important')
+    allowTruncatedGate = $false
+    strictScope      = $true
     reviewerRoleFile = '.trellis/agents/review.md'
     snapshotExcludePathspecs = @(':(exclude).trellis/tasks/*/review/**', ':(exclude).dsh/claude-review/ledger/**')
     excludePathspecs = @(':(exclude).trellis/tasks/*/review/**', ':(exclude).dsh/claude-review/ledger/**')
@@ -159,6 +201,18 @@ if ($MaxDiffChars -le 0) { $MaxDiffChars = [int]$cfg.maxDiffChars }
 if ([string]::IsNullOrWhiteSpace($Model)) { $Model = [string]$cfg.model }
 if ([string]::IsNullOrWhiteSpace($Effort)) { $Effort = [string]$cfg.effort }
 $failOn = @($cfg.failOn)
+# 缓存键用「用户原始输入」，不要用后面自动补的、带轮次号的 Description。
+$cacheDescription = $Description
+$cacheRequirements = $Requirements
+
+# profile 只是两个预设；显式 -Effort / -MaxDiffChars 仍然优先。
+if ($Profile -eq 'quick') {
+    if (-not $PSBoundParameters.ContainsKey('Effort')) { $Effort = 'low' }
+    if (-not $PSBoundParameters.ContainsKey('MaxDiffChars')) { $MaxDiffChars = [Math]::Min($MaxDiffChars, 40000) }
+} elseif ($Profile -eq 'deep') {
+    if (-not $PSBoundParameters.ContainsKey('Effort')) { $Effort = 'high' }
+    if (-not $PSBoundParameters.ContainsKey('MaxDiffChars')) { $MaxDiffChars = [Math]::Max($MaxDiffChars, 200000) }
+}
 
 # 存储选择：-Storage 是唯一入口（插件从 cordis.patch.yml 传，直接 CLI 自己传；
 # 未传时默认 auto）。不从 config.json 再读一份，避免双源静默路由。
@@ -207,7 +261,18 @@ function Resolve-TrellisTaskDir([string]$explicit) {
         if (-not (Test-Path -LiteralPath $p)) { Fail "任务目录不存在：$p" }
         return (Resolve-Path -LiteralPath $p).Path
     }
+
+    # 只认「真正的当前任务」，不再按 history 最新 / in_progress 猜。
+    # 插件把 DSH session id 传进来；Trellis 的 task.py 通过 DSH_SESSION_ID 解析 session 指针。
     $gitRoot = Push-Location $root
+    $oldDshSession = $env:DSH_SESSION_ID
+    $oldTrellisContext = $env:TRELLIS_CONTEXT_ID
+    if (-not [string]::IsNullOrWhiteSpace($SessionId)) {
+        $env:DSH_SESSION_ID = $SessionId
+        # 插件传入的 session 必须优先于 Host 进程里可能残留的 TRELLIS_CONTEXT_ID；
+        # 否则 task.py 会按外层上下文挑到别的任务。
+        Remove-Item Env:TRELLIS_CONTEXT_ID -ErrorAction SilentlyContinue
+    }
     try {
         $taskPy = Join-Path $root '.trellis/scripts/task.py'
         if (Test-Path -LiteralPath $taskPy) {
@@ -228,45 +293,18 @@ function Resolve-TrellisTaskDir([string]$explicit) {
                 }
             }
         }
-    } finally { Pop-Location }
-
-    # 2) `task.py current` 依赖会话身份；Host 进程（插件/工具调用）里通常没有这个身份，
-    #    于是会退化。这里按「审核记录最新」再按「in_progress」兜底，避免所有报告被写进 _adhoc。
-    $tasksRoot = Join-Path $root '.trellis/tasks'
-    if (Test-Path -LiteralPath $tasksRoot) {
-        $skip = @('archive', '_adhoc', '_gatetest')
-        $best = $null
-        foreach ($d in (Get-ChildItem -LiteralPath $tasksRoot -Directory -ErrorAction SilentlyContinue)) {
-            if ($skip -contains $d.Name) { continue }
-            $h = Join-Path $d.FullName 'review/history.jsonl'
-            if (Test-Path -LiteralPath $h) {
-                $t = (Get-Item -LiteralPath $h).LastWriteTimeUtc
-                if (-not $best -or $t -gt $best.time) { $best = @{ dir = $d.FullName; time = $t } }
-            }
-        }
-        if ($best) { return $best.dir }
-
-        $inProgress = @()
-        foreach ($d in (Get-ChildItem -LiteralPath $tasksRoot -Directory -ErrorAction SilentlyContinue)) {
-            if ($skip -contains $d.Name) { continue }
-            $tj = Join-Path $d.FullName 'task.json'
-            if (-not (Test-Path -LiteralPath $tj)) { continue }
-            try {
-                $j = Get-Content -LiteralPath $tj -Raw | ConvertFrom-Json
-                if ("$($j.status)" -eq 'in_progress') {
-                    $inProgress += @{ dir = $d.FullName; time = (Get-Item -LiteralPath $tj).LastWriteTimeUtc }
-                }
-            } catch { }
-        }
-        if ($inProgress.Count -gt 0) {
-            return ($inProgress | Sort-Object { $_.time } -Descending | Select-Object -First 1).dir
-        }
+    } finally {
+        if ($null -eq $oldDshSession) { Remove-Item Env:DSH_SESSION_ID -ErrorAction SilentlyContinue }
+        else { $env:DSH_SESSION_ID = $oldDshSession }
+        if ($null -eq $oldTrellisContext) { Remove-Item Env:TRELLIS_CONTEXT_ID -ErrorAction SilentlyContinue }
+        else { $env:TRELLIS_CONTEXT_ID = $oldTrellisContext }
+        Pop-Location
     }
 
-    # 3) 实在没有 Trellis 任务时才用 _adhoc
-    $adhoc = Join-Path $root '.trellis/tasks/_adhoc'
-    New-Item -ItemType Directory -Path $adhoc -Force | Out-Null
-    return $adhoc
+    # 没有会话身份时不要猜：猜错任务会连带用错 diff 基线和写错账本，比失败更糟。
+    Fail ("无法确定 Trellis 任务：task.py current 没有返回当前任务（SessionId='$SessionId'）。" +
+        "请显式传 -TaskDir <任务目录>，或在 Trellis 会话里先 task.py start <任务>；" +
+        "脚本不会按 review/history 的最新修改或 in_progress 状态猜测任务。")
 }
 
 function Get-LocalLedgerDir {
@@ -275,6 +313,11 @@ function Get-LocalLedgerDir {
 
 function Initialize-LocalLedger([string]$dir) {
     New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    # 账本目录可能没有 .gitignore（目标仓库），在这里自忽略，避免 git add/diff 把审核产物带进快照。
+    $ledgerIgnore = Join-Path $dir '.gitignore'
+    if (-not (Test-Path -LiteralPath $ledgerIgnore)) {
+        [IO.File]::WriteAllText($ledgerIgnore, "*`n", (New-Object Text.UTF8Encoding($false)))
+    }
     $taskJson = Join-Path $dir 'task.json'
     if (-not (Test-Path -LiteralPath $taskJson)) {
         $repoName = Split-Path -Leaf $root
@@ -323,7 +366,7 @@ if (Test-Path -LiteralPath $taskJsonPath) {
     try { $taskTitle = [string](Get-Content -LiteralPath $taskJsonPath -Raw | ConvertFrom-Json).title } catch { }
 }
 
-$state = @{ round = 0; lastSnapshot = ''; lastMode = ''; lastVerdict = ''; updatedAt = '' }
+$state = @{ round = 0; lastSnapshot = ''; lastMode = ''; lastVerdict = ''; lastInputHash = ''; lastReport = ''; updatedAt = '' }
 if (Test-Path -LiteralPath $statePath) {
     try {
         $s = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
@@ -344,6 +387,25 @@ function Get-HistoryRows {
     return $rows
 }
 
+function Get-RoundGuard([bool]$hadFailing) {
+    $maxRounds = [int]$cfg.maxRounds
+    $consecutive = if ($hadFailing) { 1 } else { 0 }
+    if ($maxRounds -gt 0) {
+        $rows = @(Get-HistoryRows)
+        for ($k = $rows.Count - 2; $k -ge 0; $k--) {   # 最后一行是本轮，已计入
+            $r = $rows[$k]
+            if ([string]$r.mode -ne $Mode) { break }
+            if ([string]$r.verdict -in @('pass', 'nothing-to-review')) { break }
+            $consecutive++
+        }
+    }
+    $escalate = ''
+    if ($hadFailing -and $maxRounds -gt 0 -and $consecutive -ge $maxRounds) {
+        $escalate = "同一模式已连续 $consecutive 轮未通过（上限 $maxRounds 轮，计数不区分是否为同一缺陷）：建议停止自动循环，把 review-*.md 与仍未解决的问题交给用户决策。"
+    }
+    return @{ consecutive = $consecutive; escalate = $escalate }
+}
+
 # ---------------------------------------------------------------- 2. 快照
 function Get-WorktreeTree([string]$repoRoot, [string[]]$exclude = @()) {
     # 临时索引放在系统临时目录：放进仓库内会被 git add -A 当成未跟踪文件，导致快照每次都不一致
@@ -360,12 +422,14 @@ function Get-WorktreeTree([string]$repoRoot, [string[]]$exclude = @()) {
         if ($LASTEXITCODE -ne 0) { throw 'read-tree 失败' }
         # 快照里排除审核产物等非受审内容：否则「写报告」本身会改变快照，导致 gate 误判「工作区又变了」
         $ex = @($exclude | Where-Object { $_ })
-        if ($ex.Count -gt 0) {
-            & git -C $repoRoot add -A -- . @ex 2>&1 | Out-Null
-        } else {
-            & git -C $repoRoot add -A 2>&1 | Out-Null
-        }
+        & git -C $repoRoot add -A -- . 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'git add -A 失败（临时索引）' }
+        # 在临时索引里删掉排除路径：对 tracked 的账本/review 文件也生效，且不受 .gitignore 影响。
+        $plainExcludes = @($ex | ForEach-Object { $_ -replace '^:\(exclude\)', '' } | Where-Object { $_ })
+        if ($plainExcludes.Count -gt 0) {
+            & git -C $repoRoot rm --cached -r --ignore-unmatch --quiet -- @plainExcludes 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'git rm --cached 排除审核产物失败' }
+        }
         $tree = (& git -C $repoRoot write-tree 2>$null)
         if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($tree)) { throw 'git write-tree 失败' }
         return $tree.Trim()
@@ -378,37 +442,90 @@ function Get-WorktreeTree([string]$repoRoot, [string[]]$exclude = @()) {
 
 $snapshotOk = $true
 $curTree = ''
+$rangeWorktreeTree = ''
+$rangeDirty = $false
+$rangeHeadMismatch = $false
 # 快照只排除「审核产物」：否则写报告本身会改变快照，导致 gate 误判「工作区又变了」。
 # 注意不要把这些路径加进快照排除表：.gitignore 已忽略的目录作为 pathspec 传给 git add 会报错。
 $snapshotExcludes = @($cfg.snapshotExcludePathspecs | Where-Object { $_ })
 if ($snapshotExcludes.Count -eq 0) { $snapshotExcludes = @(':(exclude).trellis/tasks/*/review/**') }
-try { $curTree = Get-WorktreeTree $root $snapshotExcludes } catch {
-    $snapshotOk = $false
-    Write-Info "快照降级：$($_.Exception.Message)。改用工作区直读。"
+if ($Mode -ne 'range') {
+    try { $curTree = Get-WorktreeTree $root $snapshotExcludes } catch {
+        $snapshotOk = $false
+        Write-Info "快照降级：$($_.Exception.Message)。改用工作区直读。"
+    }
+} else {
+    # range 的 diff 是提交区间；工作区树只用于检测「审核员 Read 到的文件是否与区间一致」。
+    try { $rangeWorktreeTree = Get-WorktreeTree $root $snapshotExcludes } catch {
+        $rangeDirty = $true
+        Write-Info "range 工作区树读取失败：$($_.Exception.Message)。按工作区可能已偏离被审区间处理。"
+    }
 }
 
 $headSha = (& git -C $root rev-parse --verify HEAD 2>$null)
 $headSha = if ($headSha) { "$headSha".Trim() } else { '' }
 
 # ---------------------------------------------------------------- 4. 计算 diff 范围
+function Resolve-Revision([string]$ref, [string]$label) {
+    $sha = (& git -C $root rev-parse --verify "$ref^{commit}" 2>$null)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sha)) { Fail "无法解析 $label：$ref" }
+    return "$sha".Trim()
+}
+
+# -Head 只对 range 有意义；full/incremental 的 head 是工作区快照。
+if (-not [string]::IsNullOrWhiteSpace($Head) -and $Mode -ne 'range') {
+    Fail '-Head 只用于 range 模式；full/incremental 的 head 始终是工作区快照。'
+}
+if ($Mode -eq 'gate') {
+    if (-not [string]::IsNullOrWhiteSpace($Base)) { Write-Info 'gate 模式忽略 -Base。' }
+    $baseOverride = ''
+    $headOverride = ''
+} else {
+    $baseOverride = if (-not [string]::IsNullOrWhiteSpace($Base)) { Resolve-Revision $Base 'Base' } else { '' }
+    $headOverride = if ($Mode -eq 'range' -and -not [string]::IsNullOrWhiteSpace($Head)) { Resolve-Revision $Head 'Head' } else { '' }
+}
 $baseRev = ''
 $baseLabel = ''
-if ($Mode -eq 'full') {
-    $baseRev = if ($headSha) { $headSha } else { '4b825dc642cb6eb9a060e54bf8d69288fbee4904' }
-    $baseLabel = if ($headSha) { "HEAD ($headSha)" } else { '(空树)' }
+$headRev = ''
+$headLabel = ''
+if ($Mode -eq 'range') {
+    if (-not $baseOverride) { Fail 'range 模式必须提供 -Base <rev>（可选 -Head <rev>，默认 HEAD）。' }
+    $baseRev = $baseOverride
+    $baseLabel = "Base $Base ($($baseRev.Substring(0, [Math]::Min(12, $baseRev.Length))))"
+    $headRev = if ($headOverride) { $headOverride } else { $headSha }
+    if ([string]::IsNullOrWhiteSpace($headRev)) { Fail 'range 模式没有可解析的 HEAD；请显式传 -Head <rev>。' }
+    $headLabel = if ($headOverride) { "Head $Head ($($headRev.Substring(0, [Math]::Min(12, $headRev.Length))))" } else { "HEAD ($($headRev.Substring(0, [Math]::Min(12, $headRev.Length))))" }
+    $rangeHeadMismatch = $headRev -ne $headSha
+    # 用同一套 excludes 检查工作区是否偏离 HEAD；直接比树会把「HEAD 跟踪了 review 文件」误判成 dirty。
+    $statusArgs = @('-C', $root, '-c', 'core.quotePath=false', 'status', '--porcelain', '--untracked-files=all', '--', '.') + @($snapshotExcludes)
+    $statusText = (& git @statusArgs 2>$null) -join "`n"
+    $rangeDirty = -not [string]::IsNullOrWhiteSpace($statusText)
+} elseif ($Mode -eq 'full') {
+    $baseRev = if ($baseOverride) { $baseOverride } elseif ($headSha) { $headSha } else { '4b825dc642cb6eb9a060e54bf8d69288fbee4904' }
+    $baseLabel = if ($baseOverride) { "Base $Base ($($baseRev.Substring(0, [Math]::Min(12, $baseRev.Length))))" } elseif ($headSha) { "HEAD ($headSha)" } else { '(空树)' }
+    $headRev = if ($snapshotOk -and $curTree) { $curTree } else { '' }
+    $headLabel = if ($headRev) { "工作区快照 $($headRev.Substring(0, [Math]::Min(12, $headRev.Length)))" } else { '工作区（快照降级）' }
+} elseif ($baseOverride) {
+    $baseRev = $baseOverride
+    $baseLabel = "Base $Base ($($baseRev.Substring(0, [Math]::Min(12, $baseRev.Length))))"
+    $headRev = if ($snapshotOk -and $curTree) { $curTree } else { '' }
+    $headLabel = if ($headRev) { "工作区快照 $($headRev.Substring(0, [Math]::Min(12, $headRev.Length)))" } else { '工作区（快照降级）' }
 } elseif ($state.lastSnapshot) {
     $baseRev = [string]$state.lastSnapshot
     $baseLabel = "上次审核快照 ($($baseRev.Substring(0, [Math]::Min(12, $baseRev.Length))))"
+    $headRev = if ($snapshotOk -and $curTree) { $curTree } else { '' }
+    $headLabel = if ($headRev) { "工作区快照 $($headRev.Substring(0, [Math]::Min(12, $headRev.Length)))" } else { '工作区（快照降级）' }
 } else {
     $baseRev = if ($headSha) { $headSha } else { '4b825dc642cb6eb9a060e54bf8d69288fbee4904' }
     $baseLabel = if ($headSha) { "HEAD ($headSha) [首次审核，范围=全部未提交改动]" } else { '(空树) [首次审核]' }
+    $headRev = if ($snapshotOk -and $curTree) { $curTree } else { '' }
+    $headLabel = if ($headRev) { "工作区快照 $($headRev.Substring(0, [Math]::Min(12, $headRev.Length)))" } else { '工作区（快照降级）' }
 }
 
-$headRev = if ($snapshotOk -and $curTree) { $curTree } else { '' }
 $excludes = @($cfg.excludePathspecs | Where-Object { $_ })
 
 function Invoke-GitDiff([string[]]$extraArgs) {
-    $a = @('-C', $root, 'diff', '--no-color') + $extraArgs
+    $a = @('-C', $root, '-c', 'core.quotePath=false', 'diff', '--no-color') + $extraArgs
     if ($headRev) {
         $a += @($baseRev, $headRev)
     } else {
@@ -450,6 +567,9 @@ if ($Mode -eq 'gate') {
             if (-not $last) { $historyCorrupt = $true }
         }
     }
+    $lastTruncated = ($null -ne $last -and ($last.PSObject.Properties.Name -contains 'truncated') -and [bool]$last.truncated)
+    $lastBaseCustom = ($null -ne $last -and ($last.PSObject.Properties.Name -contains 'baseCustom') -and [bool]$last.baseCustom)
+    $allowTruncatedGate = [bool]$cfg.allowTruncatedGate
 
     # 快照降级时 diff 会丢掉未跟踪文件，「有没有待审改动」的判断不可信 ⇒ 先 fail-closed。
     # 这个检查必须早于下面任何放行分支（包括「干净工作区」分支），否则未跟踪改动会漏检。
@@ -488,6 +608,8 @@ if ($Mode -eq 'gate') {
             [string]$last.mode -eq 'full' -and
             (@('pass', 'nothing-to-review') -contains [string]$last.verdict) -and
             (-not (($last.PSObject.Properties.Name -contains 'degraded') -and $last.degraded)) -and
+            (-not $lastTruncated -or $allowTruncatedGate) -and
+            (-not $lastBaseCustom) -and
             ([string]$last.snapshot -eq [string]$headRev)
         )
         if ($cleanPass) {
@@ -514,6 +636,12 @@ if ($Mode -eq 'gate') {
         }
         if (($last.PSObject.Properties.Name -contains 'degraded') -and $last.degraded) {
             $reasons += '上次审核在快照降级下运行，未覆盖未跟踪文件，需在索引可写时重跑 -Mode full'
+        }
+        if ($lastTruncated -and -not $allowTruncatedGate) {
+            $reasons += '最近一次审核的 diff 被截断（maxDiffChars），结论不完整；请调大 -MaxDiffChars 后重跑 -Mode full，或显式设置 allowTruncatedGate=true'
+        }
+        if ($lastBaseCustom) {
+            $reasons += '最近一次 full 使用了自定义 -Base，不是收尾门禁的普通 full；请不带 -Base 重跑 -Mode full'
         }
     }
     if ($reasons.Count -eq 0) {
@@ -543,15 +671,24 @@ if ([string]::IsNullOrWhiteSpace($diffText)) {
             minor     = 0
             files     = 0
             snapshot  = $headRev
+            base      = $baseLabel
+            head      = $headLabel
+            profile   = $Profile
+            baseCustom = [bool]($baseOverride -and $Mode -eq 'full')
             degraded  = (-not $snapshotOk)
+            truncated = $false
             report    = ''
             cost_usd  = $null
         })
     $state.round = $cleanRound
     $state.lastMode = $Mode
     $state.lastVerdict = 'nothing-to-review'
+    # 空 diff 不能保留上一轮 full 的缓存键：否则下一次相同 diff 的 full 会复用旧结论，
+    # 而 history 最后一行已经是 nothing-to-review（缓存错轮 + gate 永久卡死）。
+    $state.lastInputHash = ''
+    $state.lastReport = ''
     $state.updatedAt = (Get-Date).ToString('s')
-    if ($snapshotOk -and $headRev) { $state.lastSnapshot = $headRev }
+    if ($snapshotOk -and $headRev -and $Mode -ne 'range') { $state.lastSnapshot = $headRev }
     [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
     if ($Json) { [Console]::Out.WriteLine((@{ ok = $true; nothingToReview = $true; mode = $Mode; storage = $storageMode; round = $cleanRound; snapshot = $headRev; snapshotOk = $snapshotOk } | ConvertTo-Json -Compress)) }
     else {
@@ -563,6 +700,75 @@ if ([string]::IsNullOrWhiteSpace($diffText)) {
 }
 
 $round = [int]$state.round + 1
+$scopeWarning = ''
+# scope preflight：简报/侧重里明确提到的文件，必须至少有一个出现在 diff 里。
+# 只扫 Description + Focus（Requirements 常引用规范/参考文件，不能要求它们被改）。
+if (-not [string]::IsNullOrWhiteSpace($Description) -or -not [string]::IsNullOrWhiteSpace($Focus)) {
+    $scopeText = "$Description`n$Focus"
+    # 保护盘符冒号，避免后续按非路径字符切分时把 C:\... 切成 C 和 \...
+    $scopeText = $scopeText -replace '([A-Za-z]):([\\/])', '$1__CRC_DRIVE__$2'
+    $scopePattern = '(?<![A-Za-z0-9_./\\-])((?:[\w.-]+/)*[\w.-]+\.(?:ts|tsx|js|jsx|mjs|cjs|ps1|json|md|py|rs|go|sql|yaml|yml|toml|css|scss|html|vue|svelte|sh|bat|cmd|ini|conf))'
+    $scopeCandidates = @(
+        [regex]::Matches($scopeText, $scopePattern, 'IgnoreCase') | ForEach-Object { $_.Groups[1].Value }
+        ($scopeText -split '[^A-Za-z0-9_.\-/\\]+')
+        ([regex]::Matches($scopeText, '"([^"]+)"|''([^'']+)''') | ForEach-Object {
+            if ($_.Groups[1].Success) { $_.Groups[1].Value } else { $_.Groups[2].Value }
+        })
+    )
+    $scopeTokens = @()
+    foreach ($raw in $scopeCandidates) {
+        $token = ([string]$raw).Trim().TrimEnd('.')
+        if (-not $token) { continue }
+        $token = $token -replace '__CRC_DRIVE__', ':'
+        $token = $token -replace '\\', '/'
+        if ($token -match '^https?:' -or $token -match '\*') { continue }
+        $abs = if ([IO.Path]::IsPathRooted($token)) { $token } else { Join-Path $root $token }
+        if (-not (Test-Path -LiteralPath $abs -PathType Leaf)) { continue }
+        try { $resolved = (Resolve-Path -LiteralPath $abs).Path } catch { continue }
+        $rel = [IO.Path]::GetRelativePath($root, $resolved)
+        if ($rel.StartsWith('..')) {
+            # 仓库外的绝对路径同样不能静默放过：它不可能出现在本次 diff 里。
+            $scopeTokens += $resolved.Replace('\', '/').ToLowerInvariant()
+            continue
+        }
+        $scopeTokens += $rel.Replace('\', '/').ToLowerInvariant()
+    }
+    # 反向兜底：CJK 文件名紧贴中文说明时，上面的 \w 正则会把前导汉字吞进 token。
+    # 直接扫描仓库文件清单，按路径边界在 scopeText 里找真实文件（tracked + untracked）。
+    $scanText = $scopeText.Replace('\', '/')
+    $repoFiles = @(
+        & git -C $root -c core.quotePath=false ls-files 2>$null
+        & git -C $root -c core.quotePath=false ls-files --others --exclude-standard 2>$null
+    ) | Where-Object { $_ } | ForEach-Object { $_.Replace('\', '/').Trim() } | Sort-Object -Unique
+    $pathChar = '[A-Za-z0-9_.\-/\\]'
+    foreach ($rel in $repoFiles) {
+        if (-not $rel) { continue }
+        $idx = $scanText.IndexOf($rel, [StringComparison]::OrdinalIgnoreCase)
+        while ($idx -ge 0) {
+            $before = if ($idx -gt 0) { [string]$scanText[$idx - 1] } else { '' }
+            $afterIdx = $idx + $rel.Length
+            $after = if ($afterIdx -lt $scanText.Length) { [string]$scanText[$afterIdx] } else { '' }
+            if (($before -eq '' -or $before -notmatch $pathChar) -and ($after -eq '' -or $after -notmatch $pathChar)) {
+                $scopeTokens += $rel.ToLowerInvariant()
+                break
+            }
+            $idx = $scanText.IndexOf($rel, $idx + 1, [StringComparison]::OrdinalIgnoreCase)
+        }
+    }
+    $scopeTokens = @($scopeTokens | Sort-Object -Unique)
+    if ($scopeTokens.Count -gt 0) {
+        $diffFiles = @($fileList | ForEach-Object { $_.Replace('\', '/').ToLowerInvariant() })
+        $hit = @($scopeTokens | Where-Object { $diffFiles -contains $_ })
+        if ($hit.Count -eq 0) {
+            $msg = "scope 不一致：简报/侧重提到的文件（$($scopeTokens -join ', ')）都不在本次 diff（$($diffFiles -join ', ')）里。" +
+                ' 请检查 -TaskDir/-Base/工作区，或确认简报写错了；如确认是有意为之，可在引擎 config.json 设 strictScope=false（直接 CLI 也可加 -NoStrictScope）。'
+            $strict = if ($NoStrictScope) { $false } else { [bool]$cfg.strictScope }
+            if ($strict) { Fail $msg }
+            $scopeWarning = $msg
+            Write-Info "警告：$msg"
+        }
+    }
+}
 $truncated = $false
 $patchPath = ''
 $inlineDiff = $diffText
@@ -632,6 +838,11 @@ if ($roleParts.Count -gt 0) {
 
 $checksText = if ($Checks.Count -gt 0) { ($Checks | ForEach-Object { "- $_" }) -join "`n" } else { '- （本轮未提供客观检查结果；请自行判断改动是否需要补测试/编译）' }
 $focusText = if ($Focus) { $Focus } else { '无特别侧重，按下列维度常规审查。' }
+$scopeNote = if ($scopeWarning) { "## 范围警告`n$scopeWarning`n" } else { '' }
+$rangeNote = if ($Mode -eq 'range' -and ($rangeDirty -or $rangeHeadMismatch)) {
+    "## range 读取警告`n当前工作区与被审提交区间不一致（dirty=$rangeDirty, headMismatch=$rangeHeadMismatch）。" +
+    "你用 Read 打开的是当前工作区文件，不是 base..head 的提交版本；不要用工作区内容反驳 diff 里的旧行，评审以 diff 为准。`n"
+} else { '' }
 $patchNote = if ($truncated) {
     $rel = $patchPath.Substring($root.Length).TrimStart('\', '/')
     "内联部分只包含前 $MaxDiffChars 字符；完整 diff 已落盘：$rel 。用 Read 分段读取（先读前 300 行，再用 offset/limit 续读），不要凭内联片段推断全部改动。"
@@ -655,7 +866,7 @@ $specText
 模式: $Mode
 账本: $storageMode
 Base: $baseLabel
-Head: $(if ($headRev) { "工作区快照 $($headRev.Substring(0,[Math]::Min(12,$headRev.Length)))" } else { '工作区（快照降级）' })
+Head: $headLabel
 文件数: $fileCount
 diff 字符数: $($diffText.Length)
 
@@ -671,6 +882,8 @@ $checksText
 ## 本轮侧重
 $focusText
 
+$scopeNote
+$rangeNote
 ## git diff
 $patchNote
 
@@ -687,7 +900,8 @@ $inlineDiff
 6. severity 只用 critical / important / minor 三个词，不要写 BLOCKING/MAJOR/MINOR（词表不一致会让门禁失效）。
 7. 有 critical 或 important 时 verdict 必须是 fix 或 reject，不得 pass；只有 minor 或没有发现才可 pass。
 8. 没有真问题就给空 issues，不要凑数。
-9. 按下面 JSON 结构输出**一个 JSON 对象**，不要 markdown 围栏、不要前后解释文字。
+9. 如果 diff 被截断，必须先用 Read 读完整 patch 再下结论；没有读全就不得给 pass，并在 assessment 里写明读了哪些文件/为什么没读完。
+10. 按下面 JSON 结构输出**一个 JSON 对象**，不要 markdown 围栏、不要前后解释文字。
 
 ## 输出 JSON 结构
 {
@@ -710,6 +924,223 @@ $inlineDiff
 $promptPath = Join-Path $OutDir ("prompt-$round.md")
 [IO.File]::WriteAllText($promptPath, $prompt, (New-Object Text.UTF8Encoding($false)))
 
+# 安全缓存：只有「diff + 本次输入 + 审核员会读的上下文文件」完全相同时才复用。
+# 不做「未变文件沿用上轮结论」——跨文件契约变化无法用文件级缓存证明安全。
+function Get-Sha256([string]$text) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $bytes = [Text.Encoding]::UTF8.GetBytes($text); return (($sha.ComputeHash($bytes) | ForEach-Object { $_.ToString('x2') }) -join '') }
+    finally { $sha.Dispose() }
+}
+$cacheFiles = @()
+if ($storageMode -eq 'trellis') {
+    foreach ($n in @('prd.md', 'design.md', 'implement.md')) {
+        $p = Join-Path $taskPath $n
+        if (Test-Path -LiteralPath $p) { $cacheFiles += $p }
+    }
+    $specRoot = Join-Path $root '.trellis/spec'
+    if (Test-Path -LiteralPath $specRoot) {
+        $cacheFiles += @(Get-ChildItem -LiteralPath $specRoot -Recurse -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    }
+} else {
+    foreach ($n in @('REVIEW.md', 'AGENTS.md', 'CLAUDE.md', 'CONTRIBUTING.md')) {
+        $p = Join-Path $root $n
+        if (Test-Path -LiteralPath $p) { $cacheFiles += $p }
+    }
+}
+if (Test-Path -LiteralPath $taskJsonPath) { $cacheFiles += $taskJsonPath }
+if ($rolePath -and (Test-Path -LiteralPath $rolePath)) { $cacheFiles += $rolePath }
+$cacheSchema = Join-Path $scriptRoot 'review-schema.json'
+if (Test-Path -LiteralPath $cacheSchema) { $cacheFiles += $cacheSchema }
+# reviewer 的 CLI 模型/端点也属于输入：settings 变了就不能复用旧结论。
+$claudeSettings = Join-Path $env:USERPROFILE '.claude/settings.json'
+if (Test-Path -LiteralPath $claudeSettings) { $cacheFiles += $claudeSettings }
+# 引擎脚本与 config（failOn/reviewerRoleFile/exclude 等）也属于审核输入。
+if (Test-Path -LiteralPath $PSCommandPath) { $cacheFiles += $PSCommandPath }
+if (Test-Path -LiteralPath $configPath) { $cacheFiles += $configPath }
+$cacheFiles = @($cacheFiles | Sort-Object -Unique)
+$cacheParts = @(
+    'api=2',
+    $Mode,
+    $storageMode,
+    $taskPath,
+    $baseRev,
+    $headRev,
+    $rangeWorktreeTree,
+    $rangeDirty,
+    $rangeHeadMismatch,
+    $cacheDescription,
+    $cacheRequirements,
+    $Focus,
+    ($Checks -join "`n"),
+    ($Paths -join "`n"),
+    $Model,
+    $Effort,
+    [string]$MaxDiffChars,
+    $Profile,
+    $scopeWarning,
+    $diffText
+)
+foreach ($f in $cacheFiles) {
+    try {
+        $label = if ($rolePath -and $f -eq $rolePath) { 'role' } else { $f }
+        $cacheParts += "$label|" + (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash
+    } catch { $cacheParts += "$f|unreadable" }
+}
+$inputHash = Get-Sha256 ($cacheParts -join "`n")
+
+if (-not $DryRun -and $state.lastInputHash -eq $inputHash -and $state.lastReport -and (Test-Path -LiteralPath $state.lastReport)) {
+    $sourceReport = $null
+    try { $sourceReport = Get-Content -LiteralPath $state.lastReport -Raw | ConvertFrom-Json } catch { $sourceReport = $null }
+    $cachedVerdict = if ($sourceReport) { [string]$sourceReport.review.verdict } else { '' }
+    if ($sourceReport -and $sourceReport.review -and $cachedVerdict -in @('pass', 'fix', 'reject')) {
+        $srcIssues = @($sourceReport.review.issues | Where-Object { $_ })
+        $cachedCrit = @($srcIssues | Where-Object { [string]$_.severity -eq 'critical' }).Count
+        $cachedImp = @($srcIssues | Where-Object { [string]$_.severity -eq 'important' }).Count
+        $cachedMin = @($srcIssues | Where-Object { [string]$_.severity -eq 'minor' }).Count
+        $cachedSummary = [string]$sourceReport.review.summary
+        $cachedExit = if ($cachedVerdict -in @('fix', 'reject')) { 1 } else { 0 }
+        $cachedBaseCustom = [bool]($baseOverride -and $Mode -eq 'full')
+        $cachedReportPath = Join-Path $OutDir ("review-$round.json")
+        $cachedMdPath = Join-Path $OutDir ("review-$round.md")
+        $mdLines = @(
+            "# 审核报告 · 第 $round 轮（$Mode，缓存）",
+            '',
+            "- 来源：$($state.lastReport)",
+            "- 结论：**$cachedVerdict**",
+            "- 问题：critical=$cachedCrit important=$cachedImp minor=$cachedMin",
+            '',
+            '## 结论',
+            $cachedSummary,
+            ''
+        )
+        if ($srcIssues.Count -gt 0) {
+            $mdLines += '## 问题清单'
+            $n = 0
+            foreach ($i in $srcIssues) {
+                $n++
+                $mdLines += ''
+                $mdLines += "### $n. [$($i.severity)] $($i.file):$($i.line)"
+                $mdLines += "- key：``$($i.key)``（index $($n - 1)，0-based，与 review-$round.json 的 issues 下标一致）"
+                $mdLines += "- 问题：$($i.issue)"
+                $mdLines += "- 后果：$($i.why)"
+                $mdLines += "- 方向：$($i.fix)"
+            }
+            $mdLines += ''
+        }
+        $srcStrengths = @($sourceReport.review.strengths | Where-Object { $_ })
+        if ($srcStrengths.Count -gt 0) {
+            $mdLines += '## 做得好的地方'
+            foreach ($s in $srcStrengths) { $mdLines += "- $($s.point)（$($s.evidence)）" }
+            $mdLines += ''
+        }
+        $srcRecs = @($sourceReport.review.recommendations | Where-Object { $_ })
+        if ($srcRecs.Count -gt 0) {
+            $mdLines += '## 非阻塞建议'
+            foreach ($r in $srcRecs) { $mdLines += "- $r" }
+            $mdLines += ''
+        }
+        if ($sourceReport.review.assessment) {
+            $mdLines += '## 技术判断'
+            $mdLines += [string]$sourceReport.review.assessment
+            $mdLines += ''
+        }
+        $mdLines += '## 说明'
+        $mdLines += '复用与上次完全相同的 diff/输入，未调用模型；本次是当前轮次的缓存报告。'
+        [IO.File]::WriteAllText($cachedMdPath, (($mdLines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
+        $cachedMeta = [ordered]@{
+            task = $taskName; storage = $storageMode; round = $round; mode = $Mode
+            base = $baseLabel; head = $headLabel; baseCustom = $cachedBaseCustom
+            snapshot = $headRev; session = [ordered]@{ id = $SessionId; name = $SessionName }
+            files = $fileCount; diffChars = $diffText.Length; truncated = $truncated
+            patch = $patchPath; model = $Model; effort = $Effort; cost_usd = 0
+            duration_s = 0; reviewed_at = (Get-Date).ToString('s'); prompt = $promptPath
+            raw = ''; cached = $true; cachedFrom = [string]$state.lastReport
+            scopeWarning = $scopeWarning
+        }
+        $cachedReportObj = [ordered]@{ meta = $cachedMeta; review = $sourceReport.review }
+        [IO.File]::WriteAllText($cachedReportPath, ($cachedReportObj | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding($false)))
+
+        Add-History ([ordered]@{
+                at        = (Get-Date).ToString('s')
+                round     = $round
+                mode      = $Mode
+                storage   = $storageMode
+                verdict   = $cachedVerdict
+                critical  = $cachedCrit
+                important = $cachedImp
+                minor     = $cachedMin
+                files     = $fileCount
+                snapshot  = $headRev
+                base      = $baseLabel
+                head      = $headLabel
+                profile   = $Profile
+                baseCustom = $cachedBaseCustom
+                degraded  = (-not $snapshotOk)
+                truncated = $truncated
+                report    = $cachedReportPath
+                cost_usd  = 0
+                cached    = $true
+            })
+        $state.round = $round
+        $state.lastMode = $Mode
+        $state.lastVerdict = $cachedVerdict
+        $state.storage = $storageMode
+        $state.lastInputHash = $inputHash
+        $state.lastReport = $cachedReportPath
+        $state.updatedAt = (Get-Date).ToString('s')
+        if ($snapshotOk -and $headRev -and $Mode -ne 'range') { $state.lastSnapshot = $headRev }
+        [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
+
+        # 缓存命中也复用正常分支的连续失败/熔断提示，避免连续 fix 在缓存路径里静默。
+        $cachedHadFailing = (@($srcIssues | Where-Object { $failOn -contains [string]$_.severity }).Count -gt 0)
+        $roundGuard = Get-RoundGuard $cachedHadFailing
+        $consecutive = $roundGuard.consecutive
+        $escalate = $roundGuard.escalate
+
+        $script:runStatePath = Join-Path $OutDir 'run.json'
+        $cachedRun = [ordered]@{
+            status = 'done'; phase = 'done'; storage = $storageMode; mode = $Mode
+            round = $round; task = $taskName; cached = $true
+            verdict = $cachedVerdict; exitCode = $cachedExit
+            updatedAt = (Get-Date).ToString('s')
+        }
+        try {
+            [IO.File]::WriteAllText($script:runStatePath, ($cachedRun | ConvertTo-Json -Compress), (New-Object Text.UTF8Encoding($false)))
+        } catch { }
+        if ($Json) {
+            [Console]::Out.WriteLine(([ordered]@{
+                        ok        = $true
+                        cached    = $true
+                        verdict   = $cachedVerdict
+                        critical  = $cachedCrit
+                        important = $cachedImp
+                        minor     = $cachedMin
+                        summary   = $cachedSummary
+                        round     = $round
+                        mode      = $Mode
+                        storage   = $storageMode
+                        base      = $baseLabel
+                        head      = $headLabel
+                        profile   = $Profile
+                        truncated = $truncated
+                        scopeWarning = $scopeWarning
+                        report    = $cachedReportPath
+                        markdown  = $cachedMdPath
+                        cost_usd  = 0
+                        exitCode  = $cachedExit
+                        consecutive = $consecutive
+                        escalate  = $escalate
+                        note      = '复用与上次完全相同的 diff/输入，未调用模型；已按当前快照落一条 history，gate 可正常判定'
+                    } | ConvertTo-Json -Compress))
+        } else {
+            Write-Output "verdict   : $cachedVerdict (cached)"
+            Write-Output "report    : $cachedReportPath"
+            Write-Output "note      : 复用与上次完全相同的 diff/输入，未调用模型；已按当前快照落一条 history。"
+        }
+        exit $cachedExit
+    }
+}
+
 if ($DryRun) {
     $summary = [ordered]@{
         ok          = $true
@@ -717,6 +1148,7 @@ if ($DryRun) {
         mode        = $Mode
         storage     = $storageMode
         task        = $taskName
+        profile     = $Profile
         round       = $round
         files       = $fileCount
         diffChars   = $diffText.Length
@@ -728,6 +1160,10 @@ if ($DryRun) {
         snapshotOk  = $snapshotOk
         snapshot    = $headRev
         base        = $baseLabel
+        head        = $headLabel
+        scopeWarning = $scopeWarning
+        rangeDirty  = $rangeDirty
+        rangeHeadMismatch = $rangeHeadMismatch
     }
     if ($Json) { [Console]::Out.WriteLine(($summary | ConvertTo-Json -Compress -Depth 5)) }
     else {
@@ -865,11 +1301,17 @@ $envelope = $null
 try { $envelope = $rawOut | ConvertFrom-Json } catch { $envelope = $null }
 
 # 执行器故障优先判定：非零退出或错误 envelope 一律 exit 2，绝不当成审核结论
+$cliErrors = @()
+if ($envelope -and ($envelope.PSObject.Properties.Name -contains 'errors') -and $envelope.errors) {
+    $cliErrors = @($envelope.errors | ForEach-Object { [string]$_ } | Where-Object { $_ })
+}
 if ($procExit -ne 0) {
-    Fail ("claude 非零退出（$procExit）。stderr: " + $rawErr.Substring(0, [Math]::Min(600, $rawErr.Length)) + " raw: $rawPath")
+    $errDetail = if ($cliErrors.Count -gt 0) { "；CLI errors: " + ($cliErrors -join '; ') } else { '' }
+    Fail ("claude 非零退出（$procExit）$errDetail。stderr: " + $rawErr.Substring(0, [Math]::Min(600, $rawErr.Length)) + " raw: $rawPath")
 }
 if ($envelope -and ((($envelope.PSObject.Properties.Name -contains 'is_error') -and $envelope.is_error) -or (($envelope.PSObject.Properties.Name -contains 'type') -and [string]$envelope.type -eq 'error'))) {
-    Fail ("claude 返回错误结果（subtype=$($envelope.subtype), status=$($envelope.api_error_status)）。raw: $rawPath")
+    $errDetail = if ($cliErrors.Count -gt 0) { " errors: " + ($cliErrors -join '; ') } else { '' }
+    Fail ("claude 返回错误结果（subtype=$($envelope.subtype), status=$($envelope.api_error_status)）$errDetail。raw: $rawPath")
 }
 
 $resultText = if ($envelope -and $envelope.PSObject.Properties.Name -contains 'result') { [string]$envelope.result } else { $rawOut }
@@ -1008,6 +1450,12 @@ $reportObj = [ordered]@{
         round       = $round
         mode        = $Mode
         base        = $baseLabel
+        head        = $headLabel
+        baseCustom  = [bool]($baseOverride -and $Mode -eq 'full')
+        rangeDirty  = $rangeDirty
+        rangeHeadMismatch = $rangeHeadMismatch
+        profile     = $Profile
+        scopeWarning = $scopeWarning
         snapshot    = $headRev
         session     = [ordered]@{ id = $SessionId; name = $SessionName }
         files       = $fileCount
@@ -1075,8 +1523,10 @@ $state.round = $round
 $state.lastMode = $Mode
 $state.lastVerdict = $verdict
 $state.storage = $storageMode
+$state.lastInputHash = $inputHash
+$state.lastReport = $reportPath
 $state.updatedAt = (Get-Date).ToString('s')
-if ($snapshotOk -and $headRev) { $state.lastSnapshot = $headRev }
+if ($snapshotOk -and $headRev -and $Mode -ne 'range') { $state.lastSnapshot = $headRev }
 [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
 
 Add-History ([ordered]@{
@@ -1090,27 +1540,20 @@ Add-History ([ordered]@{
         minor     = $min
         files     = $fileCount
         snapshot  = $headRev
+        base      = $baseLabel
+        head      = $headLabel
+        profile   = $Profile
+        baseCustom = [bool]($baseOverride -and $Mode -eq 'full')
         degraded  = (-not $snapshotOk)
+        truncated = $truncated
         report    = $reportPath
         cost_usd  = $costUsd
     })
 
 # 轮次上限：同一模式连续未通过达到 maxRounds 时提示停止自动循环
-$maxRounds = [int]$cfg.maxRounds
-$consecutive = if ($hadFailing) { 1 } else { 0 }
-if ($maxRounds -gt 0) {
-    $rows = @(Get-HistoryRows)
-    for ($k = $rows.Count - 2; $k -ge 0; $k--) {   # 最后一行是本轮，已计入
-        $r = $rows[$k]
-        if ([string]$r.mode -ne $Mode) { break }
-        if ([string]$r.verdict -in @('pass', 'nothing-to-review')) { break }
-        $consecutive++
-    }
-}
-$escalate = ''
-if ($hadFailing -and $maxRounds -gt 0 -and $consecutive -ge $maxRounds) {
-    $escalate = "同一模式已连续 $consecutive 轮未通过（上限 $maxRounds 轮，计数不区分是否为同一缺陷）：建议停止自动循环，把 review-*.md 与仍未解决的问题交给用户决策。"
-}
+$roundGuard = Get-RoundGuard $hadFailing
+$consecutive = $roundGuard.consecutive
+$escalate = $roundGuard.escalate
 
 # ---------------------------------------------------------------- 10. 输出
 $exitCode = if ($hadFailing) { 1 } else { 0 }
@@ -1125,6 +1568,11 @@ if ($Json) {
                 round      = $round
                 mode       = $Mode
                 storage    = $storageMode
+                base       = $baseLabel
+                head       = $headLabel
+                profile    = $Profile
+                truncated  = $truncated
+                scopeWarning = $scopeWarning
                 report     = $reportPath
                 markdown   = $mdPath
                 cost_usd   = $costUsd

@@ -148,26 +148,59 @@ function nextReviewedRound(rounds, reportedRounds, round) {
 
 /**
  * 跨轮问题生命周期（纯函数，便于单测）。
- * 基于稳定 key；keyless 条目保持 unknown，交给 disposition 推断。
+ * keyless 但带 file/severity 的旧数据参与模糊聚类；file 为空的极端旧数据保持 unknown。
  * state: new | still-there | fixed | reopened | unreviewed | unknown
  */
 export function deriveLifecycles(rounds, reportedRounds) {
-  const byKey = new Map()
-  for (const round of rounds) {
+  const clusters = []
+  const clusterByIssue = new WeakMap()
+  const ordered = [...rounds].sort((a, b) => a.round - b.round)
+
+  // 先按 key 精确分组；key 对不上时，再按 file + severity + 文本相似度归并。
+  // 审核员换一种措辞会把 key 换掉，但同一个缺陷不该因此变成「新问题」。
+  for (const round of ordered) {
     for (const issue of round.issues) {
-      if (!issue?.key) continue
-      if (!byKey.has(issue.key)) byKey.set(issue.key, [])
-      const list = byKey.get(issue.key)
-      if (!list.includes(round.round)) list.push(round.round)
+      if (!issue || typeof issue !== 'object') continue
+      const file = String(issue.file ?? '').replace(/\\/g, '/').trim().toLowerCase()
+      const severity = String(issue.severity ?? '').trim().toLowerCase()
+      const key = String(issue.key ?? '').trim()
+      // 没有 file 且没有 key 的极端旧数据保持 unknown；只有 key 的仍可按 key 精确跟踪。
+      if (file === '' && key === '') {
+        issue.lifecycle = { state: 'unknown', firstRound: null, lastRound: null, seen: 0, reopened: false }
+        continue
+      }
+      const noFile = file === ''
+      let cluster = key ? clusters.find((candidate) => candidate.keys.has(key)) : undefined
+      if (!cluster && !noFile) {
+        let best = null
+        let bestScore = 0
+        for (const candidate of clusters) {
+          if (candidate.file !== file || candidate.severity !== severity) continue
+          for (const item of candidate.items) {
+            const score = textSimilarity(String(issue.issue ?? ''), String(item.issue?.issue ?? ''))
+            if (score >= SIMILARITY_THRESHOLD && score > bestScore) {
+              best = candidate
+              bestScore = score
+            }
+          }
+        }
+        cluster = best
+      }
+      if (!cluster) {
+        cluster = { file, severity, keys: new Set(), items: [], reopenedRounds: new Set() }
+        clusters.push(cluster)
+      }
+      if (key) cluster.keys.add(key)
+      cluster.items.push({ round: round.round, issue })
+      clusterByIssue.set(issue, cluster)
     }
   }
-  for (const list of byKey.values()) list.sort((a, b) => a - b)
 
-  const reopened = new Set()
-  for (const [key, list] of byKey) {
-    for (let index = 1; index < list.length; index += 1) {
-      const from = list[index - 1]
-      const to = list[index]
+  for (const cluster of clusters) {
+    const clusterRounds = [...new Set(cluster.items.map((item) => item.round))].sort((a, b) => a - b)
+    for (let index = 1; index < clusterRounds.length; index += 1) {
+      const from = clusterRounds[index - 1]
+      const to = clusterRounds[index]
       const hadGap = rounds.some(
         (candidate) =>
           candidate.round > from &&
@@ -175,32 +208,38 @@ export function deriveLifecycles(rounds, reportedRounds) {
           reportedRounds.has(candidate.round) &&
           candidate.verdict !== 'nothing-to-review',
       )
-      if (hadGap) reopened.add(`${key}|${to}`)
+      if (hadGap) cluster.reopenedRounds.add(to)
     }
   }
 
   for (const round of rounds) {
     const followUp = nextReviewedRound(rounds, reportedRounds, round.round)
     for (const issue of round.issues) {
-      if (!issue?.key) {
+      const cluster = clusterByIssue.get(issue)
+      if (!cluster) {
         issue.lifecycle = { state: 'unknown', firstRound: null, lastRound: null, seen: 0, reopened: false }
         continue
       }
-      const list = byKey.get(issue.key)
-      const first = list[0]
-      const last = list[list.length - 1]
-      const isReopened = reopened.has(`${issue.key}|${round.round}`)
+      const clusterRounds = [...new Set(cluster.items.map((item) => item.round))].sort((a, b) => a - b)
+      const first = clusterRounds[0]
+      const last = clusterRounds[clusterRounds.length - 1]
+      const isReopened = cluster.reopenedRounds.has(round.round)
       const isLatestHistory = !rounds.some((candidate) => candidate.round > round.round)
       let state
       if (isReopened) state = 'reopened'
       else if (round.round === last && followUp) state = 'fixed'
       else if (round.round === first && (round.round < last || isLatestHistory)) state = 'new'
       else if (round.round < last) state = 'still-there'
-      else if (list.length > 1) state = 'still-there'
+      else if (clusterRounds.length > 1) state = 'still-there'
       else state = 'unreviewed'
-      issue.lifecycle = { state, firstRound: first, lastRound: last, seen: list.length, reopened: isReopened }
+      issue.lifecycle = { state, firstRound: first, lastRound: last, seen: clusterRounds.length, reopened: isReopened }
     }
   }
+}
+
+/** 只有重跑 full 能解决的门禁阻断（直接跑 gate 会再次 blocked）。 */
+function gateNeedsFull(reason) {
+  return /截断|自定义 -Base|快照降级/.test(String(reason || ''))
 }
 
 /** 下一件事：让看板告诉人该做什么，而不只是展示状态。 */
@@ -229,11 +268,21 @@ export function deriveNextAction(active) {
       return { key: 'full', tone: 'warn', label: '跑一次 full 收尾', detail: '收尾门禁要求最近一次是 full。' }
     }
     if (active?.gate?.state === 'blocked') {
+      const reason = String(active.gate.reason || '')
+      // 截断/自定义 Base/快照降级只有重跑 full 能解决；直接跑 gate 会再次 blocked。
+      if (gateNeedsFull(reason)) {
+        return {
+          key: 'full',
+          tone: 'warn',
+          label: '重跑 full（处理截断/Base/快照降级）',
+          detail: reason || '先重跑 full，再复核门禁。',
+        }
+      }
       return {
         key: 'gate',
         tone: 'bad',
         label: '处理门禁阻断',
-        detail: active.gate.reason || '先处理阻断，再跑 gate。',
+        detail: reason || '先处理阻断，再跑 gate。',
       }
     }
     return { key: 'gate', tone: 'ok', label: '跑 gate 复核', detail: '提交前复核快照是否仍与审核时一致。' }
@@ -241,11 +290,20 @@ export function deriveNextAction(active) {
   if (latest.verdict === 'nothing-to-review') {
     if (latest.mode === 'full') {
       if (active?.gate?.state === 'blocked') {
+        const reason = String(active.gate.reason || '')
+        if (gateNeedsFull(reason)) {
+          return {
+            key: 'full',
+            tone: 'warn',
+            label: '重跑 full（处理截断/Base/快照降级）',
+            detail: reason || '先重跑 full，再复核门禁。',
+          }
+        }
         return {
           key: 'gate',
           tone: 'bad',
           label: '处理门禁阻断',
-          detail: active.gate.reason || '先处理阻断，再跑 gate。',
+          detail: reason || '先处理阻断，再跑 gate。',
         }
       }
       if (active?.gate?.state === 'pass') {
@@ -268,6 +326,12 @@ function deriveGate(history) {
   if (!last) return { state: 'unknown', reason: '还没有审核记录', source: 'panel' }
   const suffix = '（面板口径，提交前请跑 claude_review gate 复核快照是否仍一致）'
   if (last.degraded) return { state: 'blocked', reason: `最近一次审核在快照降级下运行${suffix}`, source: 'panel' }
+  if (last.truncated) {
+    return { state: 'blocked', reason: `最近一次审核的 diff 被截断，结论不完整；调大 maxDiffChars 或分片后重跑 full${suffix}`, source: 'panel' }
+  }
+  if (last.baseCustom) {
+    return { state: 'blocked', reason: `最近一次 full 使用了自定义 -Base，不是收尾门禁的普通 full${suffix}`, source: 'panel' }
+  }
   if (last.mode !== 'full') {
     return { state: 'blocked', reason: `最近一次是 ${last.mode}，收尾门禁要求 full${suffix}`, source: 'panel' }
   }
@@ -399,6 +463,7 @@ async function readTaskDetail(taskDir, storage = 'trellis', entryName = '') {
       sessionId: String(report?.meta?.session?.id ?? row.sessionId ?? ''),
       reportPath: String(row.report ?? ''),
       files: Number(row.files ?? report?.meta?.files ?? 0),
+      truncated: Boolean(row.truncated ?? report?.meta?.truncated),
       counts: {
         critical: Number(row.critical ?? 0),
         important: Number(row.important ?? 0),
@@ -586,8 +651,8 @@ export async function loadPanel(projectRoot, options = {}) {
 }
 
 /**
- * 解析要写入处置记录的任务目录：显式指定优先；Trellis 取「最新有审核记录」，
- * 本地模式取 `.dsh/claude-review/ledger`。
+ * 解析要写入处置记录的任务目录：显式指定优先；本地模式取 `.dsh/claude-review/ledger`；
+ * Trellis 下没有显式 taskDir 直接报错，不会按 history/in_progress 猜任务。
  */
 export async function resolveTaskDir(projectRoot, explicit, options = {}) {
   const root = String(projectRoot ?? '').trim()
@@ -606,25 +671,12 @@ export async function resolveTaskDir(projectRoot, explicit, options = {}) {
     throw new Error('还没有本地审核账本；先跑一次 claude_review 再记录处置。')
   }
 
-  const entries = await listTaskDirs(root, 'trellis')
-  let best = null
-  for (const entry of entries) {
-    const info = await stat(join(entry.dir, 'review', 'history.jsonl')).catch(() => null)
-    if (!info) continue
-    if (!best || info.mtimeMs > best.mtimeMs) best = { dir: entry.dir, mtimeMs: info.mtimeMs }
-  }
-  if (best) return best.dir
-  for (const entry of entries) {
-    const task = await readJsonOr(join(entry.dir, 'task.json'), {})
-    if (String(task.status) === 'in_progress') return entry.dir
-  }
-  for (const entry of entries) {
-    const info = await stat(join(entry.dir, 'review')).catch(() => null)
-    if (!info?.isDirectory()) continue
-    if (!best || info.mtimeMs > best.mtimeMs) best = { dir: entry.dir, mtimeMs: info.mtimeMs }
-  }
-  if (best) return best.dir
-  throw new Error('找不到活动的 Trellis 任务（没有 review/history.jsonl，也没有 in_progress 任务）')
+  // 写入类操作不允许猜任务：猜错会把处置记录写进别的任务，和误审一样糟。
+  // 面板不持有 DSH 会话身份，所以 Trellis 下必须显式传 taskDir（或由调用方解析后传入）。
+  throw new Error(
+    '无法确定 Trellis 任务：请显式传 taskDir（例如 .trellis/tasks/<task>），或改用 storage=local；' +
+      '不会按 review/history 或 in_progress 状态猜任务。',
+  )
 }
 
 /**
