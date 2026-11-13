@@ -1,10 +1,10 @@
 # @local/claude-code-review
 
-DSH Host 插件：把「本地 Claude Code CLI 做独立只读审核」注册成原生工具 **`claude_review`**。
+DSH Host 插件：把「本地 Claude Code 做独立只读审核」注册成原生工具 **`claude_review`**。
 
 > 本仓库是**独立插件仓库**，可以安装到任意 DSH profile；`<cwd>/tools/claude-review/**` 属于被审项目的可选引擎，不是本仓库的一部分。XinHuo 等只是被它审核过的项目。
 
-主代理（DSH）负责实现，Claude Code 负责判：独立进程、独立上下文、只读权限、拿不到主代理的推理过程。
+主代理（DSH）负责实现，Claude Code 负责判：独立进程、独立上下文、只读权限、拿不到主代理的推理过程。审核传输默认 `auto`：优先使用插件**内置的 ACP**，不可用时回退现有 Claude Code CLI；用户不需要配置 ACP。
 
 ## 它是什么 / 不是什么
 
@@ -23,6 +23,8 @@ plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claud
 
 安装后当前 profile 立即生效（bundle 通过 HMR 激活），可用 `cordis_inspect_query(platform:"host", provider:"Tool", method:"listTools")` 确认 `claude_review` 出现。
 
+插件依赖会自动安装，包括 ACP 的 `@agentclientprotocol/sdk` 与 `@agentclientprotocol/claude-agent-acp`；**不需要**再装 ACP server/profile、配 ACP agent 或单独 `npm install`。首次安装会拉 adapter（claude-agent-acp 及其 Claude Agent SDK 依赖，约 108 个包，Windows 已验证）。发布到 registry 时把 `package.json` 改成公开包名并去掉 `private`；依赖会随插件安装进入 profile。
+
 ## 用法（模型侧）
 
 | 参数 | 说明 |
@@ -39,8 +41,8 @@ plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claud
 | `cwd` | 要审的仓库，默认当前会话工作目录 |
 | `dryRun` | 只组装输入、不调模型 |
 
-返回：`ok / mode / storage / base / head / profile / verdict / critical / important / minor / summary / reportPath / markdownPath / costUsd / truncated / scopeWarning / cached / exitCode / escalated / note / enginePath / engineSource / engineWarning`。
-`verdict` 为 `fix` 或 `gate-blocked` 时 `ok=false`，`note` 会写明「必须先修，再重跑同一模式」；`cached=true` 表示命中了完全相同输入的缓存，没有调用模型。
+返回：`ok / mode / storage / base / head / profile / transport / verdict / critical / important / minor / summary / reportPath / markdownPath / costUsd / costKnown / truncated / scopeWarning / cached / exitCode / escalated / note / enginePath / engineSource / engineWarning`。
+`verdict` 为 `fix` 或 `gate-blocked` 时 `ok=false`，`note` 会写明「必须先修，再重跑同一模式」；`cached=true` 表示命中了完全相同输入的缓存，没有调用模型。`transport` 是实际使用的 `acp` 或 `cli`；ACP 目前不返回逐轮成本，`costKnown=false`、`costUsd=0`（面板显示 `—`，不伪造）。
 
 ## 引擎解析顺序与版本握手
 
@@ -49,13 +51,13 @@ plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claud
 3. `<cwd>/.dsh/claude-review/Invoke-ClaudeReview.ps1`
 4. 插件自带的 `scripts/Invoke-ClaudeReview.ps1`（跨仓库兜底，可用 `allowBundledFallback: false` 关掉）
 
-每个候选引擎先读文件头的 `# claude-review-api: 2`：
+每个候选引擎先读文件头的 `# claude-review-api: 3`：
 
-- 有标记 → 使用该引擎；
+- 有标记且版本 >= 3 → 使用该引擎；v2 旧引擎会被跳过并回退自带引擎（新参数 `-Transport/-NodeExe` 不会被错误地当成模型问题）；
 - 标记缺失/版本过低 → 跳过，并回退到自带引擎；结果里带 `engineWarning`，工具 `note` 会显示；
 - `enginePath` 显式配置且 `allowBundledFallback: false` 时，版本不符直接报错，不会静默换引擎。
 
-引擎也支持 `pwsh -File scripts/Invoke-ClaudeReview.ps1 -Capabilities`，直接输出 `{api:2, storage, base, range, truncatedGate, profiles}`。旧版目标引擎没有这些参数时，插件会给出明确的「接口版本不符」而不是把参数绑定错误伪装成「模型输出不可解析」。
+引擎也支持 `pwsh -File scripts/Invoke-ClaudeReview.ps1 -Capabilities`，直接输出 `{api:3, storage, base, range, truncatedGate, profiles, transport}`。旧版目标引擎没有这些参数时，插件会给出明确的「接口版本不符」而不是把参数绑定错误伪装成「模型输出不可解析」。
 
 ## 审核账本（Trellis / 本地）
 
@@ -81,7 +83,8 @@ plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claud
 ## 平台与依赖
 
 - Windows + PowerShell 7（`pwsh`），通过 `ctx.subprocess` 调度，遵守 Host 的进程与沙箱约束。
-- 需要本地 `claude` CLI 已安装并可用（引擎自己解析可执行文件；可在本插件的 `scripts/config.json`，或被审仓库的 `tools/claude-review/config.json` 里固定 `claudeExe`）。
+- 需要本地 `claude` CLI 已安装并可用（引擎自己解析可执行文件；可在本插件的 `scripts/config.json`，或被审仓库的 `tools/claude-review/config.json` 里固定 `claudeExe`）。ACP 也复用它作为 agent 的底层 CLI。
+- ACP 依赖随插件安装；`scripts/acp-review.mjs` 使用 DSH Host 的 Node/Electron 运行，不要求用户 PATH 有 node。Windows 已验证；首次安装会拉 `claude-agent-acp` 及其 Claude Agent SDK 依赖（约 108 个包）。
 - 本机沙箱下审核进程通常只有 `Read` 可用（`Grep`/`Glob` 也可能被拒；`Bash` 不开放），引擎会把 diff 与改动文件清单内联进简报。
 - 审核进程只开放 `Read` / `Grep` / `Glob`；**不开放 Bash**，`Write/Edit/NotebookEdit` 也禁用。只读由工具层强制，不依赖提示词。
 - 引擎自带通用 reviewer role（`scripts/reviewer-role.md`）；项目自己的 `.trellis/agents/review.md` 存在时会合并进去。Trellis 模式还会把 `.trellis/spec/**/index.md` 路径列进简报，让审核员按需读取。
@@ -91,13 +94,32 @@ plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claud
 - **range 的 Read 语义**：diff 是 base..head 提交区间，但审核员用 `Read` 看到的是**当前工作区**。工作区 dirty 或 `-Head != HEAD` 时，简报会明确警告“以 diff 为准”，且缓存键包含工作区树；需要严格按提交内容审时，先确保工作区干净。
 - **自定义 Base 不是收尾门禁**：`full -Base HEAD~1` 适合评已提交区间；门禁只认不带 `-Base` 的普通 `full`，否则可以绕开完整范围。`range` 本身也不满足收尾门禁。
 
+## 审核传输：内置 ACP（默认 auto）/ CLI
+
+`transport` 在 `cordis.patch.yml` 配置，默认 `auto`；直接 CLI 用 `-Transport auto|acp|cli`。
+
+- **ACP 是插件内部实现，不是用户要配的 ACP 环境**。`@agentclientprotocol/sdk` 和 `@agentclientprotocol/claude-agent-acp` 是 `package.json` 的普通依赖，安装插件时自动进入插件的 `node_modules`；**不需要** ACP server/profile、ACP agent、编辑器配置或单独 `npm install`。
+- `auto` 在 bridge、adapter、DSH Host Node 可用时走 ACP；不可用则自动回退现有 Claude CLI（bridge 以 exit 3 报告“传输不可用”，不会把 ACP 启动失败伪装成审核结论）。
+- bridge 是 `scripts/acp-review.mjs`，用官方 SDK 的 `client()` / `buildSession().start()` / `readText()`，不手写 JSON-RPC。插件把 `process.execPath` 传给引擎；Host 是 Electron 时加 `ELECTRON_RUN_AS_NODE=1`，所以**不要求用户 PATH 里有 node**。
+- 只读边界：ACP 会话先显式 `session/set_mode` 到 `default`（失败即中止），并在 adapter 的 `_meta` 里 `disallowedTools` 禁用 `Write/Edit/NotebookEdit/Bash/PowerShell/WebFetch/WebSearch`；`session/request_permission` 只批准 `read/search`，拒绝 edit/execute/terminal，`fs/read_text_file` 实现、`fs/write_text_file` 拒绝。不把 `allowedTools` 裸名写进 options，避免 adapter 自动放行、绕过 `canUseTool` 权限回调。prompt/role/报告/gate 复用现有契约。
+- **role 层级**：adapter 声明 `sessionCapabilities.systemPrompt` 时，reviewer role 通过 `session/new` 的 `systemPrompt: {mode:'append'}` 进入 system 层（`roleMode=system`），不再和不可信 diff 同级；adapter 不支持时才回退为 prompt 前置（`roleMode=prompt`）。报告 meta 记录 `roleMode`。
+- **auto 回退可见**：bridge 在发出 prompt 前失败（exit 3）时回退 CLI，并写 `transportWarning`（首条错误）到工具 `note`、报告 meta、history 和面板轮次；ACP 的失败 envelope/err 保留在 `raw-<round>-acp.json` / `acp-err-<round>.txt`。启动期超时（initialize/session/setMode 卡住）同样归类为 exit 3，不会让 auto 白等整轮。
+- **成本未知不伪造**：ACP 轮次 `cost_usd=null`、工具 `costKnown=false`、面板显示「成本 —」；混有未知成本轮次时总成本显示为「累计 ≥ $X（含未知）」，全未知且为 0 时显示「成本 —」而不是 `$0.00`。`nothing-to-review` 未调用模型，成本固定为已知 0。
+- **roleMode 审计**：ACP 报告 `roleMode=system`（systemPrompt）或 `prompt`（回退）；CLI 因 `--append-system-prompt-file` 记录为 `system`，无 role 为 `none`。
+- **启动预算**：ACP 初始化/会话/setMode 有独立短预算（`TimeoutSec/10`，夹在 5–30s）；卡死时 exit 3 回退 CLI，且回退后重新计时，不会吃掉整轮审核预算。
+- **预算/模型透传**：`maxBudgetUsd`、`model`、`effort` 通过 `session/new` 的 `_meta.claudeCode.options.extraArgs` 传给 adapter（fake 测试断言 `max-budget-usd`/`model`/`effort`），不再是 ACP 静默忽略。
+- ACP adapter 仍复用现有 Claude Code（`CLAUDE_CODE_EXECUTABLE` 指向引擎解析到的 `claude`），因此 **Claude Code 及其鉴权/模型/relay 仍是插件前置**；这不是 ACP 配置。
+- **成本**：当前 ACP adapter 不提供逐轮 `total_cost_usd`，报告里 `cost_usd=null`、工具 `costKnown=false`，面板不显示假的 `$0`。需要精确成本时用 `transport: cli`。
+- ACP 通过 `session/new` 的 `_meta.claudeCode.options.extraArgs` 透传 `maxBudgetUsd`/`model`/`effort`；未配置时用 Claude settings。需要强制 CLI 用 `transport: cli`。
+- **发布**：把 `package.json` 改成公开包名并去掉 `private` 后发布；依赖会随插件安装自动带上，最终用户仍然只装插件，不需要额外 ACP 安装/配置。
+
 ## 协同面板（会话内第三个 tab）
 
 在会话顶部「对话｜轨迹」旁边多一个 **协同**（`conversation.view`，`id=collab`，order 20，不替换任何现有 UI）。
 
 显示内容（全部只读）：
 
-- **审核轮次时间线**：本项目**所有会话**的轮次（#round / 模式（含范围 range） / verdict / 分级计数 / 会话 id 短号 / 时间 / 成本），点开看每条问题的 `why`、`fix`、`key`、生命周期与处置徽章；被截断的轮次显示「截断」；
+- **审核轮次时间线**：本项目**所有会话**的轮次（#round / 模式（含范围 range） / 传输（ACP/CLI） / verdict / 分级计数 / 会话 id 短号 / 时间 / 成本），点开看每条问题的 `why`、`fix`、`key`、生命周期与处置徽章；被截断的轮次显示「截断」；ACP 轮次成本未知时显示 `—`；
 - **下一步**：由最近一轮和门禁推导唯一动作（跑第一次审核 / 修 N 条必修 / 补 full / 跑 gate / 处理阻断）；
 - **项目任务切换**：右侧列出项目里的任务及其门禁/待修/最近轮次，点击切换当前任务详情；
 - **问题 → 修复结果**：生命周期（新发现 / 仍存在 / 已修复 / 复发 / 未复检）+ 显式处置（已修 / 已反证 / 暂缓）；
@@ -162,15 +184,20 @@ Host 路由（本插件注册的 webServer resource）
 在本包目录运行（不调用模型）：
 
 ```powershell
-pwsh -NoProfile -File test/engine-gate.ps1   # 54 个断言：gate 快照/历史/本地/Trellis、range、截断、scope、任务解析
+pwsh -NoProfile -File test/engine-gate.ps1   # 55 个断言：gate 快照/历史/本地/Trellis、range、截断、scope、任务解析
 pwsh -NoProfile -File test/engine-cache.ps1  # 8 个断言：fake Claude 验证缓存、空 diff 清 hash、gate 可解锁
+pwsh -NoProfile -File test/engine-acp.ps1    # 10 个断言：fake ACP full/gate、空格路径、auto→CLI、超时/启动超时回退
 node test/tool-smoke.mjs                     # 59 个断言，约 10 秒
-node test/panel-smoke.mjs                    # 62 个断言（真实仓库断言可选，见下）
-node test/client-smoke.mjs                   # 11 个断言
+node test/panel-smoke.mjs                    # 65 个断言（真实仓库断言可选，见下）
+node test/client-smoke.mjs                   # 14 个断言
+node test/acp-smoke.mjs                      # 13 个断言：role/budget extraArgs、只读权限、fs、真实 adapter 启动失败
 ```
 
 - `engine-gate`：在临时 git 仓库里直接跑引擎 gate，覆盖本地无历史/full pass/快照不一致/incremental/fix/history 损坏/无历史有改动、Trellis pass、显式 trellis 缺 `.trellis`、range 提交区间与 dirty/head mismatch 标记、`full -Base`、截断 full pass 不过 gate、自定义 Base 的 full 不冒充收尾门禁、scope 不一致（含 dotfile / Windows 绝对路径 / 跨盘符 / 带空格 / 无扩展名 / 汉字紧贴路径 / 中文文件名正反向）、`-Head` 仅 range、gate 忽略 Base、忽略或已跟踪的本地账本都不导致快照漂移、跟踪的 review 文件不把 range 误判为 dirty、`SessionId → task.py current` 与「无活动任务不猜」。
 - `engine-cache`：用编译的 fake Claude 统计真实调用次数；相同 diff/输入第二次直接 cached（0 次新调用）但会按当前快照落一条零成本 history；中间插入空 diff 轮次会清掉旧 hash，随后相同 full 重新审核，gate 能正常通过。
+- `engine-acp`：用 fake ACP agent（官方 SDK 的 agent 侧）驱动引擎 `-Transport acp` 的 full/gate，断言 `transport=acp`、报告 meta、gate 可通过；另覆盖含空格 cwd、auto→CLI、ACP 超时 fail-closed、adapter 启动即崩、bridge 启动超时仍回退 CLI 并带 `transportWarning`；不调用真实模型。
+- `acp-smoke`：真实 `scripts/acp-review.mjs` + 官方 SDK + fake ACP agent，断言初始化/会话/消息/结果 envelope，reviewer role 走 `session/new` 的 systemPrompt、read 允许、edit 拒绝、fs 读 line/limit、fs 写拒绝、启动失败 exit 3；并用**真实 adapter 入口**（缺 `CLAUDE_CODE_EXECUTABLE`）断言启动失败被归类为 exit 3。
+- `panel-smoke`：新增 `transportWarning` 透传与 ACP 未知成本时总成本标记为部分和；`client-smoke` 新增 `transportWarning`/部分成本渲染断言。
 - `tool-smoke`：命令行构造（含 `-Storage`/`-Base`/`-Head`/`-Profile`）、`fix`/`gate-blocked` 必须 `ok=false`、`exit 2` 必须抛错、`dryRun` 透传、旧引擎回退、缓存结果、引擎缺失可诊断、Trellis/本地处置写入，以及面板路由的授权/冷启动重试/大小写比较/本地模式。
 - `panel-smoke`：问题匹配、轮次聚合、处置叠加、生命周期（new/still/fixed/reopened/unreviewed + 换措辞聚类 + 空 file 无 key 保持 unknown / 有 key 仍跟踪）、下一步动作（含 range、截断/自定义 Base/快照降级在 pass 与 nothing-to-review 两种状态下都重跑 full）、截断门禁、任务切换、Trellis 与本地账本、`nothing-to-review` 语义。真实仓库断言用 `CLAUDE_REVIEW_REPO=<Trellis 仓库>` 指定；未指定且包不在 Trellis 仓库内时记 SKIP。
 - `client-smoke`：静态检查客户端注入、`conversation.view` 注册、原生 style 注入与路由访问边界。

@@ -63,6 +63,9 @@ function check(name, condition, detail) {
 {
   check('C10 只 fetch 自己的面板路由', source.includes('/claude-review/api/panel'), 'missing panel route')
   check('C11 不引用 node 内置模块', !/from 'node:/.test(source) && !/require\('node:/.test(source), 'node builtin import in client')
+  check('C12 轮次显示 transport 与未知成本', source.includes('crc-round-transport') && source.includes("'成本 —'"), 'missing transport/cost rendering')
+  check('C13 显示 transportWarning 与部分成本', source.includes('crc-round-warning') && source.includes('累计 ≥'), 'missing warning/partial total')
+  check('C14 全未知成本不显示 $0.00', source.includes("totalKnown ? '$0.00' : '成本 —'"), 'unknown cost still $0.00')
 }
 
 console.log('')

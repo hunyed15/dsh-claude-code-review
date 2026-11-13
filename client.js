@@ -92,6 +92,8 @@ window.__ModuleLoader__.load({
 .crc-round-head:focus-visible { outline:2px solid var(--crc-brand); outline-offset:-2px; }
 .crc-round-no { font-size:12.5px; font-weight:650; font-variant-numeric:tabular-nums; }
 .crc-round-mode { color:var(--crc-muted); font-size:11.5px; }
+.crc-round-transport { color:var(--crc-accent, var(--crc-muted)); font-size:10.5px; letter-spacing:.04em; border:1px solid var(--crc-line); border-radius:999px; padding:0 6px; }
+.crc-round-warning { margin:6px 0 0; color:var(--crc-warn, var(--crc-muted)); font-size:12px; line-height:1.5; }
 .crc-round-counts { display:inline-flex; align-items:center; gap:8px; color:var(--crc-muted); font-size:11.5px; font-variant-numeric:tabular-nums; }
 .crc-count-critical { color:var(--crc-bad); }
 .crc-count-important { color:var(--crc-warn); }
@@ -457,10 +459,11 @@ window.__ModuleLoader__.load({
         ? `最近 ${modeLabel(latest.mode)} ${meta(VERDICT_META, latest.verdict)[0]}`
         : '还没有审核记录'
       const latestSub = latest
-        ? `${modeLabel(latest.mode)}${latest.costUsd ? `，${money(latest.costUsd)}` : ''}`
+        ? `${modeLabel(latest.mode)}${latest.transport ? ` · ${String(latest.transport).toUpperCase()}` : ''}${latest.costKnown !== false && latest.costUsd ? `，${money(latest.costUsd)}` : ''}`
         : '等待第一次审核'
       const totalCost = Number(props.totalCostUsd) || 0
-      const totalText = totalCost > 0 ? `累计 ${money(totalCost)}` : '累计 —'
+      const totalKnown = props.totalCostKnown !== false
+      const totalText = totalCost > 0 ? `${totalKnown ? '累计' : '累计 ≥'} ${money(totalCost)}${totalKnown ? '' : '（含未知）'}` : '累计 —'
       return h(
         'section',
         { className: 'crc-rail', 'aria-label': '审核概览' },
@@ -628,6 +631,7 @@ window.__ModuleLoader__.load({
             h('span', { className: 'crc-round-no' }, `#${round.round}`),
             h(Pill, { tone: verdict[1], title: `结论 ${round.verdict || '未知'}` }, verdict[0]),
             h('span', { className: 'crc-round-mode', title: `模式 ${round.mode || '未知'}` }, modeLabel(round.mode)),
+            round.transport ? h('span', { className: 'crc-round-transport', title: `传输 ${round.transport}` }, String(round.transport).toUpperCase()) : null,
             round.truncated ? h(Pill, { tone: 'bad', title: 'diff 被截断，结论不完整' }, '截断') : null,
             h(
               'span',
@@ -637,7 +641,11 @@ window.__ModuleLoader__.load({
               h('span', { className: 'crc-count-minor' }, `次要 ${counts.minor || 0}`),
             ),
             h('span', { className: 'crc-round-when', title: round.at || '' }, when(round.at)),
-            round.costUsd ? h('span', { className: 'crc-round-cost' }, money(round.costUsd)) : null,
+            round.costKnown === false && round.transport === 'acp'
+              ? h('span', { className: 'crc-round-cost', title: 'ACP 目前不返回逐轮成本' }, '成本 —')
+              : round.costKnown !== false && round.costUsd
+                ? h('span', { className: 'crc-round-cost' }, money(round.costUsd))
+                : null,
             h(ChevronIcon, { className: 'crc-chevron' }),
           ),
           open
@@ -645,12 +653,18 @@ window.__ModuleLoader__.load({
                 'div',
                 { className: 'crc-round-detail' },
                 round.summary ? h('p', { className: 'crc-summary' }, round.summary) : null,
+                round.transportWarning ? h('p', { className: 'crc-round-warning' }, round.transportWarning) : null,
                 h(
                   'div',
                   { className: 'crc-round-meta' },
                   h('span', null, `文件 ${round.files ?? 0}`),
                   h('span', null, `会话 ${shortId(round.sessionId)}`),
-                  round.costUsd ? h('span', null, `成本 ${money(round.costUsd)}`) : null,
+                  round.transport ? h('span', null, `传输 ${String(round.transport).toUpperCase()}`) : null,
+                  round.costKnown === false && round.transport === 'acp'
+                    ? h('span', null, '成本 —')
+                    : round.costKnown !== false && round.costUsd
+                      ? h('span', null, `成本 ${money(round.costUsd)}`)
+                      : null,
                 ),
                 h(RoundAdvice, { round }),
                 issues.length === 0
@@ -709,7 +723,8 @@ window.__ModuleLoader__.load({
       const activeName = active?.task?.name || ''
       const next = active?.nextAction || null
       const totalCost = Number(active?.totalCostUsd) || 0
-      const totalText = totalCost > 0 ? money(totalCost) : '$0.00'
+      const totalKnown = active?.totalCostKnown !== false
+      const totalText = totalCost > 0 ? `${totalKnown ? '' : '≥ '}${money(totalCost)}` : (totalKnown ? '$0.00' : '成本 —')
       const taskRow = (task) => {
         const isActive = task.name === activeName
         const taskGate = meta(GATE_META, task.gate?.state)
@@ -1052,7 +1067,7 @@ window.__ModuleLoader__.load({
                   runDetail ? h('span', { className: 'crc-run-detail' }, runDetail) : null,
                 )
               : null,
-            h(StatusRail, { active, rounds, latest, totalCostUsd: active?.totalCostUsd || 0 }),
+            h(StatusRail, { active, rounds, latest, totalCostUsd: active?.totalCostUsd || 0, totalCostKnown: active?.totalCostKnown !== false }),
             h(
               'div',
               { className: 'crc-grid' },

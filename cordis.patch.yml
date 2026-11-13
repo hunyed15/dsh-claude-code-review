@@ -8,6 +8,9 @@
         # 审核账本：auto = 有 .trellis 用 Trellis，否则用 .dsh/claude-review/ledger；
         # trellis 要求仓库已初始化 Trellis；local 绝不会创建 .trellis。
         storage: auto
+        # 审核传输：auto = 优先内置 ACP（依赖随插件安装），不可用时回退现有 CLI；也可强制 acp/cli。
+        # 用户无需安装/配置 ACP：SDK 与 claude-agent-acp 是插件自己的依赖。
+        transport: auto
         # 单次审核超时（秒），会作为 -TimeoutSec 传给引擎，并决定工具级超时（引擎超时 + 120s 余量）。
         timeoutSec: 1500
         # 是否允许在别的仓库里回退到插件自带的引擎副本

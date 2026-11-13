@@ -79,8 +79,8 @@ function check(name, condition, detail) {
   await writeFile(
     join(reviewDir, 'history.jsonl'),
     [
-      JSON.stringify({ at: '2026-11-12T10:00:00', round: 1, mode: 'full', verdict: 'fix', critical: 1, important: 0, minor: 1, files: 2, cost_usd: 0.5 }),
-      JSON.stringify({ at: '2026-11-12T10:10:00', round: 2, mode: 'full', verdict: 'pass', critical: 0, important: 0, minor: 1, files: 2, cost_usd: 0.4 }),
+      JSON.stringify({ at: '2026-11-12T10:00:00', round: 1, mode: 'full', verdict: 'fix', critical: 1, important: 0, minor: 1, files: 2, cost_usd: null, transport: 'acp', transportWarning: 'ACP 不可用，已回退 CLI：fake' }),
+      JSON.stringify({ at: '2026-11-12T10:10:00', round: 2, mode: 'full', verdict: 'pass', critical: 0, important: 0, minor: 1, files: 2, cost_usd: 0.4, transport: 'cli' }),
     ].join('\n') + '\n',
   )
   const issue1 = { key: 'aaa', severity: 'critical', file: 'x.js', line: '10', issue: '空指针崩溃', why: '会崩', fix: '判空' }
@@ -113,6 +113,11 @@ function check(name, condition, detail) {
   const otherFileIssue = round1.issues.find((issue) => issue.key === 'ddd')
   check('B10 同文件不同问题 → same-file（不复用 still-there）', otherFileIssue?.disposition?.status === 'same-file', JSON.stringify(otherFileIssue?.disposition))
   check('B9 第 2 轮无下一轮 → unreviewed', panel.active.rounds.find((r) => r.round === 2).issues[0]?.disposition?.status === 'unreviewed')
+  const acpRound = panel.active.rounds.find((round) => round.round === 1)
+  const acpWarning = acpRound?.transportWarning
+  check('B11 面板透传 transportWarning', String(acpWarning ?? '').includes('ACP 不可用'), JSON.stringify(acpWarning))
+  // round 1 是 ACP（成本未知）；round 2 有 costUsd；总成本必须标记为部分和
+  check('B12 成本未知轮次让总成本标记不完整', panel.active?.totalCostKnown === false, JSON.stringify({ totalCostUsd: panel.active?.totalCostUsd, totalCostKnown: panel.active?.totalCostKnown }))
 
   await appendDispositions(taskDir, [{ round: 1, key: 'aaa', status: 'fixed', note: '已加判空', evidence: ['x.js'] }], 'session-abc12345')
   const panel2 = await loadPanel(root)
@@ -450,6 +455,8 @@ function check(name, condition, detail) {
   const still = panel2.active.rounds.find((round) => round.round === 1)
   check('H4 只有 nothing-to-review → unreviewed', still?.issues?.[0]?.disposition?.status === 'unreviewed', JSON.stringify(still?.issues?.[0]?.disposition))
   check('H5 只有 nothing-to-review → lifecycle unreviewed', still?.issues?.[0]?.lifecycle?.state === 'unreviewed', JSON.stringify(still?.issues?.[0]?.lifecycle))
+  const nothingRound = panel2.active.rounds.find((round) => round.round === 2)
+  check('H6 nothing-to-review 成本已知为 0', nothingRound?.costKnown === true && nothingRound?.costUsd === 0, JSON.stringify({ costKnown: nothingRound?.costKnown, costUsd: nothingRound?.costUsd }))
   await rm(root2, { recursive: true, force: true })
 }
 

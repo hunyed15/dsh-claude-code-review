@@ -454,12 +454,22 @@ async function readTaskDetail(taskDir, storage = 'trellis', entryName = '') {
     if (!Number.isFinite(round)) continue
     const report = await readJsonOr(join(reviewDir, `review-${round}.json`), null)
     if (report !== null) reportedRounds.add(round)
+    const rowCost = typeof row.cost_usd === 'number' ? row.cost_usd : null
+    const metaCost = typeof report?.meta?.cost_usd === 'number' ? report.meta.cost_usd : null
+    const rowVerdict = String(row.verdict ?? report?.review?.verdict ?? '')
+    // nothing-to-review 没有调用模型，成本是确定的 0，而不是未知。
+    const nothingToReview = rowVerdict === 'nothing-to-review'
+    const costKnown = nothingToReview || rowCost !== null || metaCost !== null
+    const costUsd = nothingToReview ? 0 : (costKnown ? (rowCost ?? metaCost) : 0)
     rounds.push({
       round,
       mode: String(row.mode ?? report?.meta?.mode ?? ''),
-      verdict: String(row.verdict ?? report?.review?.verdict ?? ''),
+      transport: String(row.transport ?? report?.meta?.transport ?? ''),
+      transportWarning: String(row.transportWarning ?? report?.meta?.transportWarning ?? ''),
+      verdict: rowVerdict,
       at: String(row.at ?? report?.meta?.reviewed_at ?? ''),
-      costUsd: typeof row.cost_usd === 'number' ? row.cost_usd : Number(report?.meta?.cost_usd ?? 0),
+      costUsd,
+      costKnown,
       sessionId: String(report?.meta?.session?.id ?? row.sessionId ?? ''),
       reportPath: String(row.report ?? ''),
       files: Number(row.files ?? report?.meta?.files ?? 0),
@@ -542,6 +552,7 @@ async function readTaskDetail(taskDir, storage = 'trellis', entryName = '') {
   const gate = deriveGate(history)
   const latest = rounds.length > 0 ? rounds[rounds.length - 1] : null
   const totalCostUsd = rounds.reduce((sum, round) => sum + (Number(round.costUsd) || 0), 0)
+  const totalCostKnown = rounds.every((round) => round.costKnown !== false)
   const pending = latest ? (latest.counts.critical || 0) + (latest.counts.important || 0) : 0
   const detail = {
     task: {
@@ -562,6 +573,7 @@ async function readTaskDetail(taskDir, storage = 'trellis', entryName = '') {
     lastVerdict: latest ? latest.verdict : '',
     pending,
     totalCostUsd,
+    totalCostKnown,
     nextAction: null,
     run: await readRunState(reviewDir),
   }
@@ -581,6 +593,7 @@ function summaryOf(detail, mtimeMs = 0) {
     pending: detail.pending,
     lastVerdict: detail.lastVerdict,
     totalCostUsd: detail.totalCostUsd,
+    totalCostKnown: detail.totalCostKnown,
     storage: detail.storage,
     mtime: mtimeMs,
   }

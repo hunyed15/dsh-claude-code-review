@@ -10,6 +10,7 @@
   "failOn": ["critical", "important"],
   "allowTruncatedGate": false,
   "strictScope": true,
+  "transport": "auto",
   "reviewerRoleFile": ".trellis/agents/review.md",
   "snapshotExcludePathspecs": [
     ":(exclude).trellis/tasks/*/review/**",

@@ -26,8 +26,9 @@ function Check([string]$name, [bool]$condition, [string]$detail = '') {
 $capRaw = & pwsh -NoProfile -File $engine -Capabilities 2>$null
 $cap = $null
 try { $cap = ($capRaw | Out-String) | ConvertFrom-Json } catch { }
-Check 'CAP1 -Capabilities 输出 api=2' ($null -ne $cap -and [int]$cap.api -eq 2) ($capRaw | Out-String)
+Check 'CAP1 -Capabilities 输出 api=3' ($null -ne $cap -and [int]$cap.api -eq 3) ($capRaw | Out-String)
 Check 'CAP2 -Capabilities 声明 local storage' ($null -ne $cap -and (@($cap.storage) -contains 'local'))
+Check 'CAP3 -Capabilities 声明 transport' ($null -ne $cap -and (@($cap.transport) -contains 'acp') -and (@($cap.transport) -contains 'cli'))
 
 function New-TestRepo {
     $dir = Join-Path $env:TEMP ("crc-gate-" + [guid]::NewGuid().ToString('N').Substring(0, 8))

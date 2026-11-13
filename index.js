@@ -86,10 +86,10 @@ function storageMode(config) {
   return ['auto', 'trellis', 'local'].includes(config?.storage) ? config.storage : 'auto'
 }
 
-// 引擎能力握手：文件头 `# claude-review-api: 2` 是静态标记，避免每次审核多 spawn 一次探测。
+// 引擎能力握手：文件头 `# claude-review-api: 3` 是静态标记，避免每次审核多 spawn 一次探测。
 // 旧目标仓库（例如 tools/claude-review 里的旧脚本）没有这个标记，插件必须回退自带引擎，
 // 否则新插件传 -Storage 会在旧脚本的参数绑定阶段直接失败。
-const ENGINE_API = 2
+const ENGINE_API = 3
 const ENGINE_API_RE = /#\s*claude-review-api:\s*(\d+)/
 const engineApiCache = new Map()
 
@@ -197,10 +197,14 @@ function normalizedResult(envelope, exitCode) {
     base: String(envelope?.base ?? ''),
     head: String(envelope?.head ?? ''),
     profile: String(envelope?.profile ?? ''),
+    transport: String(envelope?.transport ?? ''),
+    roleMode: String(envelope?.roleMode ?? ''),
+    transportWarning: String(envelope?.transportWarning ?? ''),
     truncated: envelope?.truncated === true,
     scopeWarning: String(envelope?.scopeWarning ?? ''),
     cached: envelope?.cached === true,
     costUsd: typeof envelope?.cost_usd === 'number' ? envelope.cost_usd : 0,
+    costKnown: typeof envelope?.cost_usd === 'number',
     exitCode,
     dryRun: envelope?.dryRun === true,
     escalated: String(envelope?.escalate ?? ''),
@@ -226,6 +230,9 @@ function normalizedResult(envelope, exitCode) {
   // ok 是调用方判断「可否继续/可否提交」的主信号：结论不通过时必须为 false，
   // 不能只靠 note 的文字提醒（否则门禁在工具层就被绕过了）。
   if (exitCode === 1 || base.verdict === 'fix' || base.verdict === 'reject') base.ok = false
+  if (base.transportWarning) {
+    base.note = base.note ? `${base.note} ${base.transportWarning}` : base.transportWarning
+  }
   return base
 }
 
@@ -391,10 +398,14 @@ export function apply(ctx, config = {}) {
           base: { type: 'string' },
           head: { type: 'string' },
           profile: { type: 'string' },
+          transport: { type: 'string' },
+          roleMode: { type: 'string' },
+          transportWarning: { type: 'string' },
           truncated: { type: 'boolean' },
           scopeWarning: { type: 'string' },
           cached: { type: 'boolean' },
           costUsd: { type: 'number' },
+          costKnown: { type: 'boolean' },
           exitCode: { type: 'integer' },
           dryRun: { type: 'boolean' },
           escalated: { type: 'string' },
@@ -465,6 +476,13 @@ export function apply(ctx, config = {}) {
       if (typeof options.profile === 'string' && options.profile.trim() !== '') {
         pushValue('-Profile', options.profile)
       }
+      const configuredTransport = ['auto', 'acp', 'cli'].includes(config.transport) ? config.transport : 'auto'
+      parts.push('-Transport', psQuote(configuredTransport))
+      if (typeof process.execPath === 'string' && process.execPath !== '') {
+        // 用 DSH Host 自己的运行时，不要求用户 PATH 里有 node。
+        parts.push('-NodeExe', psQuote(process.execPath))
+      }
+      if (process.versions && process.versions.electron) parts.push('-NodeRunAsNode')
       pushList('-Checks', options.checks)
       pushList('-Paths', options.paths)
       if (options.dryRun === true) parts.push('-DryRun')

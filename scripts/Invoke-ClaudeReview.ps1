@@ -1,4 +1,4 @@
-# claude-review-api: 2
+# claude-review-api: 3
 <#
 .SYNOPSIS
     DSH × Claude Code 审核回环（Trellis 集成版）。
@@ -92,6 +92,11 @@ param(
     [ValidateSet('auto', 'trellis', 'local')]
     [string]$Storage = 'auto',
     [string]$TaskDir = '',
+    [ValidateSet('', 'auto', 'acp', 'cli')]
+    [string]$Transport = '',
+    [string]$NodeExe = '',
+    [switch]$NodeRunAsNode,
+    [string]$AcpAdapter = '',
     [string]$Base = '',
     [string]$Head = '',
     [ValidateSet('', 'quick', 'deep')]
@@ -148,13 +153,14 @@ if ($Help) {
 # 必须在任何路径/配置/账本检查之前返回，保证旧仓库里的引擎不会因为 Cwd 不存在而误判。
 if ($Capabilities) {
     [Console]::Out.WriteLine(([ordered]@{
-                api           = 2
+                api           = 3
                 name          = 'claude-code-review'
                 storage       = @('auto', 'trellis', 'local')
                 base          = $true
                 range         = $true
                 truncatedGate = $true
                 profiles      = @('quick', 'deep')
+                transport     = @('auto', 'acp', 'cli')
             } | ConvertTo-Json -Compress))
     exit 0
 }
@@ -182,6 +188,7 @@ $cfg = @{
     failOn           = @('critical', 'important')
     allowTruncatedGate = $false
     strictScope      = $true
+    transport        = 'auto'
     reviewerRoleFile = '.trellis/agents/review.md'
     snapshotExcludePathspecs = @(':(exclude).trellis/tasks/*/review/**', ':(exclude).dsh/claude-review/ledger/**')
     excludePathspecs = @(':(exclude).trellis/tasks/*/review/**', ':(exclude).dsh/claude-review/ledger/**')
@@ -200,6 +207,8 @@ if ($TimeoutSec -le 0) { $TimeoutSec = [int]$cfg.timeoutSec }
 if ($MaxDiffChars -le 0) { $MaxDiffChars = [int]$cfg.maxDiffChars }
 if ([string]::IsNullOrWhiteSpace($Model)) { $Model = [string]$cfg.model }
 if ([string]::IsNullOrWhiteSpace($Effort)) { $Effort = [string]$cfg.effort }
+if ([string]::IsNullOrWhiteSpace($Transport)) { $Transport = if ($cfg.transport) { [string]$cfg.transport } else { 'auto' } }
+if ($Transport -notin @('auto', 'acp', 'cli')) { Fail "transport 必须是 auto|acp|cli（当前 '$Transport'）" }
 $failOn = @($cfg.failOn)
 # 缓存键用「用户原始输入」，不要用后面自动补的、带轮次号的 Description。
 $cacheDescription = $Description
@@ -957,9 +966,16 @@ if (Test-Path -LiteralPath $claudeSettings) { $cacheFiles += $claudeSettings }
 # 引擎脚本与 config（failOn/reviewerRoleFile/exclude 等）也属于审核输入。
 if (Test-Path -LiteralPath $PSCommandPath) { $cacheFiles += $PSCommandPath }
 if (Test-Path -LiteralPath $configPath) { $cacheFiles += $configPath }
+# ACP transport 的 bridge/依赖版本也影响输出；缓存不能把 CLI 的旧结论当成 ACP 的。
+$acpBridgeCache = Join-Path $scriptRoot 'acp-review.mjs'
+if (Test-Path -LiteralPath $acpBridgeCache) { $cacheFiles += $acpBridgeCache }
+$pluginPackageCache = Join-Path (Split-Path -Parent $scriptRoot) 'package.json'
+if (Test-Path -LiteralPath $pluginPackageCache) { $cacheFiles += $pluginPackageCache }
+$acpAdapterCache = Join-Path (Split-Path -Parent $scriptRoot) 'node_modules/@agentclientprotocol/claude-agent-acp/package.json'
+if (Test-Path -LiteralPath $acpAdapterCache) { $cacheFiles += $acpAdapterCache }
 $cacheFiles = @($cacheFiles | Sort-Object -Unique)
 $cacheParts = @(
-    'api=2',
+    'api=3',
     $Mode,
     $storageMode,
     $taskPath,
@@ -977,6 +993,7 @@ $cacheParts = @(
     $Effort,
     [string]$MaxDiffChars,
     $Profile,
+    $Transport,
     $scopeWarning,
     $diffText
 )
@@ -1047,6 +1064,13 @@ if (-not $DryRun -and $state.lastInputHash -eq $inputHash -and $state.lastReport
         $mdLines += '## 说明'
         $mdLines += '复用与上次完全相同的 diff/输入，未调用模型；本次是当前轮次的缓存报告。'
         [IO.File]::WriteAllText($cachedMdPath, (($mdLines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
+        $cacheTransport = if ($sourceReport -and $sourceReport.meta -and $sourceReport.meta.transport) {
+            [string]$sourceReport.meta.transport
+        } else {
+            ''
+        }
+        $cacheRoleMode = if ($sourceReport -and $sourceReport.meta -and $sourceReport.meta.roleMode) { [string]$sourceReport.meta.roleMode } else { '' }
+        $cacheTransportWarning = if ($sourceReport -and $sourceReport.meta -and $sourceReport.meta.transportWarning) { [string]$sourceReport.meta.transportWarning } else { '' }
         $cachedMeta = [ordered]@{
             task = $taskName; storage = $storageMode; round = $round; mode = $Mode
             base = $baseLabel; head = $headLabel; baseCustom = $cachedBaseCustom
@@ -1056,6 +1080,9 @@ if (-not $DryRun -and $state.lastInputHash -eq $inputHash -and $state.lastReport
             duration_s = 0; reviewed_at = (Get-Date).ToString('s'); prompt = $promptPath
             raw = ''; cached = $true; cachedFrom = [string]$state.lastReport
             scopeWarning = $scopeWarning
+            transport = $cacheTransport
+            roleMode = $cacheRoleMode
+            transportWarning = $cacheTransportWarning
         }
         $cachedReportObj = [ordered]@{ meta = $cachedMeta; review = $sourceReport.review }
         [IO.File]::WriteAllText($cachedReportPath, ($cachedReportObj | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding($false)))
@@ -1074,6 +1101,9 @@ if (-not $DryRun -and $state.lastInputHash -eq $inputHash -and $state.lastReport
                 base      = $baseLabel
                 head      = $headLabel
                 profile   = $Profile
+                transport = $cacheTransport
+                roleMode = $cacheRoleMode
+                transportWarning = $cacheTransportWarning
                 baseCustom = $cachedBaseCustom
                 degraded  = (-not $snapshotOk)
                 truncated = $truncated
@@ -1122,6 +1152,9 @@ if (-not $DryRun -and $state.lastInputHash -eq $inputHash -and $state.lastReport
                         base      = $baseLabel
                         head      = $headLabel
                         profile   = $Profile
+                        transport = $cacheTransport
+                        roleMode  = $cacheRoleMode
+                        transportWarning = $cacheTransportWarning
                         truncated = $truncated
                         scopeWarning = $scopeWarning
                         report    = $cachedReportPath
@@ -1205,6 +1238,35 @@ function Resolve-ClaudeExe([string]$explicit) {
 
 $claudeExe = Resolve-ClaudeExe ([string]$cfg.claudeExe)
 
+function Resolve-NodeExe([string]$explicit) {
+    if (-not [string]::IsNullOrWhiteSpace($explicit)) {
+        if (Test-Path -LiteralPath $explicit) { return (Resolve-Path -LiteralPath $explicit).Path }
+        return ''
+    }
+    $cmd = Get-Command node -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source -and (Test-Path -LiteralPath $cmd.Source)) { return (Resolve-Path -LiteralPath $cmd.Source).Path }
+    return ''
+}
+
+# PowerShell 的 Start-Process -ArgumentList <数组> 只是按空格拼接，不会给含空格的路径加引号。
+# 路径里有空格时（Windows 用户名/项目目录很常见）必须自己构造带引号的命令行。
+function Quote-ProcessArg([string]$value) {
+    if ($value -match '[\s"]') {
+        return '"' + ($value -replace '"', '\"') + '"'
+    }
+    return $value
+}
+
+# ACP 是 引擎 -> bridge -> adapter -> claude 的多级进程树；只杀 bridge 会留下孤儿 reviewer。
+function Stop-ReviewProcessTree([int]$processId) {
+    if (-not $processId) { return }
+    try {
+        if ($IsWindows) { & taskkill.exe /PID $processId /T /F 2>$null | Out-Null }
+        else { Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue }
+    } catch { }
+    try { Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue } catch { }
+}
+
 # ---------------------------------------------------------------- 7. 调用
 # 只读边界：只开放 Read/Grep/Glob，不开放 Bash（git 写操作、--output 写文件都无从谈起）。
 $allowedTools = 'Read,Grep,Glob'
@@ -1262,38 +1324,136 @@ function Write-RunState([string]$status, [string]$phase, [hashtable]$extra = @{}
 
 Write-RunState 'running' 'starting' @{}
 $sw = [Diagnostics.Stopwatch]::StartNew()
-$proc = Start-Process -FilePath $claudeExe -ArgumentList $cliArgs `
-    -RedirectStandardInput $promptIn -RedirectStandardOutput $outFile -RedirectStandardError $errFile `
-    -NoNewWindow -PassThru
-Write-RunState 'running' 'reviewing' @{ pid = $proc.Id }
-$timedOut = $false
-# 用 WaitForExit(5000) 做阻塞式探测：返回值会刷新进程状态，避免 HasExited 缓存误判；
-# 每次 5s 超时后再写心跳，既保留进度又不丢正常退出。
-while (-not $proc.WaitForExit(5000)) {
-    if ($sw.Elapsed.TotalSeconds -ge $TimeoutSec) {
-        $timedOut = $true
-        try { $proc.Kill() } catch { }
-        break
-    }
-    Write-RunState 'running' 'reviewing' @{ pid = $proc.Id; elapsedSec = [int]$sw.Elapsed.TotalSeconds }
+
+# ACP is an internal transport: deps are plugin dependencies, no user ACP setup.
+# auto = ACP when bridge/adapter/node are available, otherwise the existing CLI.
+$acpBridge = Join-Path $scriptRoot 'acp-review.mjs'
+$acpAdapter = if (-not [string]::IsNullOrWhiteSpace($AcpAdapter)) {
+    $AcpAdapter
+} else {
+    Join-Path (Split-Path -Parent $scriptRoot) 'node_modules/@agentclientprotocol/claude-agent-acp/dist/index.js'
 }
-if ($timedOut) {
-    $sw.Stop()
-    Get-ChildItem $runDir -File -ErrorAction SilentlyContinue | Copy-Item -Destination $OutDir -Force -ErrorAction SilentlyContinue
-    Fail "审核超时（>${TimeoutSec}s）。可调大 -TimeoutSec、调小 -MaxDiffChars，或用 -Paths 缩小范围。"
+$nodeExe = Resolve-NodeExe $NodeExe
+$useAcp = $Transport -ne 'cli' -and (Test-Path -LiteralPath $acpBridge) -and (Test-Path -LiteralPath $acpAdapter) -and -not [string]::IsNullOrWhiteSpace($nodeExe)
+if ($Transport -eq 'acp' -and -not $useAcp) {
+    Fail "ACP transport 不可用：需要 acp-review.mjs、插件依赖 @agentclientprotocol/claude-agent-acp 和 Node 运行时。重装/更新插件即可，无需单独配置 ACP。"
+}
+# 启动预算必须短：ACP 初始化卡死时尽快回退 CLI，而不是吃掉整轮 TimeoutSec。
+$acpStartupMs = [Math]::Min(30000, [Math]::Max(5000, [int]($TimeoutSec * 1000 / 10)))
+
+$script:ReviewBridge = $acpBridge
+$script:ReviewAdapter = $acpAdapter
+$script:ReviewNodeExe = $nodeExe
+$script:ReviewClaudeExe = $claudeExe
+$script:ReviewPromptIn = $promptIn
+$script:ReviewRolePath = $rolePath
+$script:ReviewCliArgs = $cliArgs
+$script:ReviewOutFile = $outFile
+$script:ReviewErrFile = $errFile
+$script:ReviewTimeoutSec = $TimeoutSec
+$script:ReviewNodeRunAsNode = [bool]$NodeRunAsNode
+$script:ReviewStartupMs = $acpStartupMs
+$script:ReviewMaxBudgetUsd = $maxBudgetUsd
+$script:ReviewModel = $Model
+$script:ReviewEffort = $Effort
+
+function Start-ReviewProcess([ValidateSet('acp', 'cli')][string]$kind) {
+    if ($kind -eq 'acp') {
+        $acpArgs = @($script:ReviewBridge, '--prompt', $script:ReviewPromptIn, '--role', $script:ReviewRolePath,
+            '--cwd', $root, '--claude', $script:ReviewClaudeExe,
+            '--adapter', $script:ReviewAdapter,
+            '--startup-timeout-ms', [string]$script:ReviewStartupMs,
+            '--timeout-ms', [string]([Math]::Max(5000, ($script:ReviewTimeoutSec * 1000) - 10000)))
+        if ($script:ReviewMaxBudgetUsd -gt 0) { $acpArgs += @('--max-budget-usd', [string]$script:ReviewMaxBudgetUsd) }
+        if (-not [string]::IsNullOrWhiteSpace($script:ReviewModel)) { $acpArgs += @('--model', [string]$script:ReviewModel) }
+        if (-not [string]::IsNullOrWhiteSpace($script:ReviewEffort)) { $acpArgs += @('--effort', [string]$script:ReviewEffort) }
+        $acpLine = (@($acpArgs | ForEach-Object { Quote-ProcessArg ([string]$_) }) -join ' ')
+        $oldRunAsNode = $env:ELECTRON_RUN_AS_NODE
+        if ($script:ReviewNodeRunAsNode) { $env:ELECTRON_RUN_AS_NODE = '1' }
+        try {
+            return Start-Process -FilePath $script:ReviewNodeExe -ArgumentList $acpLine `
+                -RedirectStandardOutput $script:ReviewOutFile -RedirectStandardError $script:ReviewErrFile `
+                -NoNewWindow -PassThru
+        } finally {
+            if ($null -ne $oldRunAsNode) { $env:ELECTRON_RUN_AS_NODE = $oldRunAsNode }
+            else { Remove-Item Env:ELECTRON_RUN_AS_NODE -ErrorAction SilentlyContinue }
+        }
+    }
+    # --json-schema 元素本身已带外层引号，不能再包一层；其余含空格的参数需要引用。
+    $cliLine = (@($script:ReviewCliArgs | ForEach-Object {
+                $item = [string]$_
+                if ($item -match '^".*"$') { $item } else { Quote-ProcessArg $item }
+            }) -join ' ')
+    return Start-Process -FilePath $script:ReviewClaudeExe -ArgumentList $cliLine `
+        -RedirectStandardInput $script:ReviewPromptIn -RedirectStandardOutput $script:ReviewOutFile -RedirectStandardError $script:ReviewErrFile `
+        -NoNewWindow -PassThru
+}
+
+$acpUsed = $useAcp
+$transportUsed = if ($acpUsed) { 'acp' } else { 'cli' }
+$transportWarning = ''
+$proc = Start-ReviewProcess $(if ($acpUsed) { 'acp' } else { 'cli' })
+Write-RunState 'running' $(if ($acpUsed) { 'reviewing (acp)' } else { 'reviewing' }) @{ pid = $proc.Id; transport = $transportUsed }
+$timedOut = $false
+while ($true) {
+    # 用 WaitForExit(5000) 做阻塞式探测：返回值会刷新进程状态，避免 HasExited 缓存误判；
+    # 每次 5s 超时后再写心跳，既保留进度又不丢正常退出。
+    while (-not $proc.WaitForExit(5000)) {
+        if ($sw.Elapsed.TotalSeconds -ge $TimeoutSec) {
+            $timedOut = $true
+            try { Stop-ReviewProcessTree $proc.Id } catch { }
+            break
+        }
+        Write-RunState 'running' 'reviewing' @{ pid = $proc.Id; elapsedSec = [int]$sw.Elapsed.TotalSeconds; transport = $transportUsed }
+    }
+    if ($timedOut) {
+        $sw.Stop()
+        Get-ChildItem $runDir -File -ErrorAction SilentlyContinue | Copy-Item -Destination $OutDir -Force -ErrorAction SilentlyContinue
+        Fail "审核超时（>${TimeoutSec}s）。可调大 -TimeoutSec、调小 -MaxDiffChars，或用 -Paths 缩小范围。"
+    }
+
+    $rawOut = if (Test-Path -LiteralPath $outFile) { [IO.File]::ReadAllText($outFile) } else { '' }
+    $rawErr = if (Test-Path -LiteralPath $errFile) { [IO.File]::ReadAllText($errFile) } else { '' }
+    $procExit = if ($null -ne $proc.ExitCode) { [int]$proc.ExitCode } else { 0 }
+
+    # The bridge exits 3 only when the ACP runtime is unavailable (not when the model failed).
+    if ($acpUsed -and $procExit -eq 3 -and $Transport -eq 'auto') {
+        $acpErrors = @()
+        try {
+            $acpEnvelope = $rawOut | ConvertFrom-Json
+            if ($acpEnvelope -and $acpEnvelope.PSObject.Properties.Name -contains 'errors' -and $acpEnvelope.errors) {
+                $acpErrors = @($acpEnvelope.errors | ForEach-Object { [string]$_ } | Where-Object { $_ })
+            }
+        } catch { }
+        $firstError = if ($acpErrors.Count -gt 0) { $acpErrors[0] } elseif (-not [string]::IsNullOrWhiteSpace($rawErr)) {
+            (@($rawErr -split "`r?`n" | Where-Object { $_.Trim() } | Select-Object -First 1) -join ' ')
+        } else { "exit $procExit" }
+        $transportWarning = "ACP 不可用，已回退 CLI：$firstError"
+        # 保留失败现场，避免 CLI 覆盖 ACP 的 raw/err。
+        try {
+            [IO.File]::WriteAllText((Join-Path $OutDir "raw-$round-acp.json"), $rawOut, (New-Object Text.UTF8Encoding($false)))
+            [IO.File]::WriteAllText((Join-Path $OutDir "acp-err-$round.txt"), $rawErr, (New-Object Text.UTF8Encoding($false)))
+        } catch { }
+        Write-Info $transportWarning
+        $acpUsed = $false
+        $transportUsed = 'cli'
+        $proc = Start-ReviewProcess 'cli'
+        # ACP 启动预算不能占用 CLI 的审核预算：回退后重新计时。
+        $sw.Restart()
+        Write-RunState 'running' 'reviewing' @{ pid = $proc.Id; transport = 'cli'; transportWarning = $transportWarning }
+        $timedOut = $false
+        continue
+    }
+    break
 }
 $sw.Stop()
-
-$rawOut = if (Test-Path -LiteralPath $outFile) { [IO.File]::ReadAllText($outFile) } else { '' }
-$rawErr = if (Test-Path -LiteralPath $errFile) { [IO.File]::ReadAllText($errFile) } else { '' }
 $rawPath = Join-Path $OutDir ("raw-$round.json")
 [IO.File]::WriteAllText($rawPath, $rawOut, (New-Object Text.UTF8Encoding($false)))
 Get-ChildItem $runDir -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 Remove-Item $runDir -Recurse -Force -ErrorAction SilentlyContinue
-
-$procExit = if ($null -ne $proc.ExitCode) { [int]$proc.ExitCode } else { 0 }
 if ([string]::IsNullOrWhiteSpace($rawOut)) {
-    Fail ("claude 无输出（退出码 $procExit）。stderr: " + $rawErr.Substring(0, [Math]::Min(600, $rawErr.Length)))
+    $kindLabel = if ($acpUsed) { 'ACP' } else { 'claude' }
+    Fail ("$kindLabel 无输出（退出码 $procExit）。stderr: " + $rawErr.Substring(0, [Math]::Min(600, $rawErr.Length)))
 }
 
 # ---------------------------------------------------------------- 8. 解析
@@ -1306,15 +1466,25 @@ if ($envelope -and ($envelope.PSObject.Properties.Name -contains 'errors') -and 
     $cliErrors = @($envelope.errors | ForEach-Object { [string]$_ } | Where-Object { $_ })
 }
 if ($procExit -ne 0) {
-    $errDetail = if ($cliErrors.Count -gt 0) { "；CLI errors: " + ($cliErrors -join '; ') } else { '' }
-    Fail ("claude 非零退出（$procExit）$errDetail。stderr: " + $rawErr.Substring(0, [Math]::Min(600, $rawErr.Length)) + " raw: $rawPath")
+    $kindLabel = if ($acpUsed) { 'ACP' } else { 'claude' }
+    $errDetail = if ($cliErrors.Count -gt 0) { "；errors: " + ($cliErrors -join '; ') } else { '' }
+    Fail ("$kindLabel 非零退出（$procExit）$errDetail。stderr: " + $rawErr.Substring(0, [Math]::Min(600, $rawErr.Length)) + " raw: $rawPath")
 }
 if ($envelope -and ((($envelope.PSObject.Properties.Name -contains 'is_error') -and $envelope.is_error) -or (($envelope.PSObject.Properties.Name -contains 'type') -and [string]$envelope.type -eq 'error'))) {
+    $kindLabel = if ($acpUsed) { 'ACP' } else { 'claude' }
     $errDetail = if ($cliErrors.Count -gt 0) { " errors: " + ($cliErrors -join '; ') } else { '' }
-    Fail ("claude 返回错误结果（subtype=$($envelope.subtype), status=$($envelope.api_error_status)）$errDetail。raw: $rawPath")
+    Fail ("$kindLabel 返回错误结果（subtype=$($envelope.subtype), status=$($envelope.api_error_status)）$errDetail。raw: $rawPath")
 }
 
 $resultText = if ($envelope -and $envelope.PSObject.Properties.Name -contains 'result') { [string]$envelope.result } else { $rawOut }
+$roleMode = if ($envelope -and ($envelope.PSObject.Properties.Name -contains 'roleMode')) {
+    [string]$envelope.roleMode
+} elseif ($roleExists) {
+    # CLI 用 --append-system-prompt-file 把 role 放在 system 层；envelope 不带 roleMode。
+    'system'
+} else {
+    'none'
+}
 $clean = $resultText.Trim()
 $clean = $clean -replace '(?s)^```(?:json)?\s*', ''
 $clean = $clean -replace '(?s)\s*```\s*$', ''
@@ -1455,6 +1625,9 @@ $reportObj = [ordered]@{
         rangeDirty  = $rangeDirty
         rangeHeadMismatch = $rangeHeadMismatch
         profile     = $Profile
+        transport   = $transportUsed
+        roleMode    = $roleMode
+        transportWarning = $transportWarning
         scopeWarning = $scopeWarning
         snapshot    = $headRev
         session     = [ordered]@{ id = $SessionId; name = $SessionName }
@@ -1543,6 +1716,9 @@ Add-History ([ordered]@{
         base      = $baseLabel
         head      = $headLabel
         profile   = $Profile
+        transport = $transportUsed
+        roleMode  = $roleMode
+        transportWarning = $transportWarning
         baseCustom = [bool]($baseOverride -and $Mode -eq 'full')
         degraded  = (-not $snapshotOk)
         truncated = $truncated
@@ -1571,6 +1747,9 @@ if ($Json) {
                 base       = $baseLabel
                 head       = $headLabel
                 profile    = $Profile
+                transport  = $transportUsed
+                roleMode   = $roleMode
+                transportWarning = $transportWarning
                 truncated  = $truncated
                 scopeWarning = $scopeWarning
                 report     = $reportPath

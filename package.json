@@ -1,9 +1,9 @@
 {
   "name": "@local/claude-code-review",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "private": true,
   "type": "module",
-  "description": "Independent read-only code review with the local Claude Code CLI, exposed as DSH tools plus a 协同 panel.",
+  "description": "Independent read-only code review with the local Claude Code CLI, exposed as DSH tools plus a 协同 panel. Includes an internal ACP transport (auto-installed deps, no user ACP setup).",
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -19,10 +19,15 @@
     "locale/*.json",
     "icon.svg",
     "scripts/Invoke-ClaudeReview.ps1",
+    "scripts/acp-review.mjs",
     "scripts/config.json",
     "scripts/review-schema.json",
     "scripts/reviewer-role.md"
   ],
+  "dependencies": {
+    "@agentclientprotocol/claude-agent-acp": "^0.106.0",
+    "@agentclientprotocol/sdk": "^2.6.0"
+  },
   "dsh": {
     "bundle": { "patch": "./cordis.patch.yml" },
     "client": {
