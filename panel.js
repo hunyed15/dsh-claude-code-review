@@ -242,6 +242,80 @@ function gateNeedsFull(reason) {
   return /截断|自定义 -Base|快照降级/.test(String(reason || ''))
 }
 
+/**
+ * issue 的终态（纯函数）：
+ *   open → fixed（待复检）→ verified（下一轮确认消失）/ reopened（下一轮仍在）
+ *   deferred / counter-evidence 是明确处置；没有处置且没有下一轮才是 open。
+ * `disposition.status` 保留审核/推断来源；`followUp` 只表示下一轮是否再出现。
+ */
+export function deriveIssueStatus(issue) {
+  const disposition = String(issue?.disposition?.status ?? '')
+  const followUp = String(issue?.followUp ?? '')
+  if (disposition === 'deferred') return 'deferred'
+  if (disposition === 'counter-evidence') return 'counter-evidence'
+  if (disposition === 'fixed') {
+    if (followUp === 'still-there' || followUp === 'same-file') return 'reopened'
+    if (followUp === 'gone') return 'verified'
+    return 'fixed'
+  }
+  if (followUp === 'gone') return 'verified'
+  if (followUp === 'still-there' || followUp === 'same-file') return 'reopened'
+  if (disposition === 'still-there' || disposition === 'same-file') return 'reopened'
+  if (disposition === 'gone') return 'verified'
+  return 'open'
+}
+
+const DEFAULT_FAIL_ON = ['critical', 'important']
+
+/**
+ * round 的关闭状态（纯函数）。blocking 由 failOn 决定；minor 不阻断关闭。
+ *   open → fixing → ready-for-verification → verified / closed-with-risk / reopened
+ * `openBlocking` 只算 open+reopened，面板“待处置”不要拿发现总数冒充。
+ */
+export function deriveRoundStatus(round, failOn = DEFAULT_FAIL_ON) {
+  const blockingSeverities = new Set(
+    (Array.isArray(failOn) && failOn.length > 0 ? failOn : DEFAULT_FAIL_ON).map((severity) => String(severity).toLowerCase()),
+  )
+  const issues = Array.isArray(round?.issues) ? round.issues : []
+  const counts = { open: 0, fixed: 0, verified: 0, reopened: 0, deferred: 0, counterEvidence: 0, minorOpen: 0 }
+  let blocking = 0
+  for (const issue of issues) {
+    const status = String(issue?.status ?? deriveIssueStatus(issue))
+    const isBlocking = blockingSeverities.has(String(issue?.severity ?? '').toLowerCase())
+    if (!isBlocking) {
+      if (status === 'open' || status === 'fixed' || status === 'reopened') counts.minorOpen += 1
+      continue
+    }
+    blocking += 1
+    if (status === 'fixed') counts.fixed += 1
+    else if (status === 'verified') counts.verified += 1
+    else if (status === 'reopened') counts.reopened += 1
+    else if (status === 'deferred') counts.deferred += 1
+    else if (status === 'counter-evidence') counts.counterEvidence += 1
+    else counts.open += 1
+  }
+  const disposed = counts.fixed + counts.verified + counts.deferred + counts.counterEvidence
+  let status
+  if (counts.reopened > 0) status = 'reopened'
+  else if (counts.open > 0 && disposed > 0) status = 'fixing'
+  else if (counts.open > 0) status = 'open'
+  else if (counts.fixed > 0) status = 'ready-for-verification'
+  else if (counts.deferred + counts.counterEvidence > 0) status = 'closed-with-risk'
+  else status = 'verified'
+  return {
+    status,
+    blocking,
+    open: counts.open,
+    fixed: counts.fixed,
+    verified: counts.verified,
+    reopened: counts.reopened,
+    deferred: counts.deferred,
+    counterEvidence: counts.counterEvidence,
+    minorOpen: counts.minorOpen,
+    openBlocking: counts.open + counts.reopened,
+  }
+}
+
 /** 下一件事：让看板告诉人该做什么，而不只是展示状态。 */
 export function deriveNextAction(active) {
   const rounds = Array.isArray(active?.rounds) ? active.rounds : []
@@ -254,6 +328,56 @@ export function deriveNextAction(active) {
     }
   }
   const latest = [...rounds].sort((a, b) => b.round - a.round)[0]
+  const hasIssueList = Array.isArray(latest.issues)
+  if (hasIssueList) {
+    const state = latest.status ? { ...latest, status: latest.status, openBlocking: latest.openBlocking } : deriveRoundStatus(latest)
+    const open = Number(state.openBlocking) || 0
+    if (state.status === 'open' || state.status === 'fixing' || state.status === 'reopened') {
+      return {
+        key: 'fix',
+        tone: 'bad',
+        label: open > 0 ? `修复并处置 ${open} 条必修问题` : '按结论修复并处置',
+        detail: '修完用 claude_review_disposition 标记 fixed/deferred/counter-evidence；未处置前不允许进入下一轮。',
+      }
+    }
+    if (state.status === 'ready-for-verification') {
+      return {
+        key: 'review',
+        tone: 'warn',
+        label: '复检本轮修复',
+        detail: '用 claude_review 重跑同一模式；已处置的 findings 允许进入复检，复检仍存在会标为复现。',
+      }
+    }
+    if (state.status === 'verified' && (latest.verdict === 'fix' || latest.verdict === 'reject')) {
+      return {
+        key: 'gate',
+        tone: 'bad',
+        label: '处理门禁阻断',
+        detail: active?.gate?.reason || '本轮 blocking 已全部验证；最近一次结论是 fix，先跑 gate 或重跑 full 取得 pass。',
+      }
+    }
+    if (state.status === 'closed-with-risk') {
+      return {
+        key: 'gate',
+        tone: 'bad',
+        label: '处理门禁阻断',
+        detail: 'blocking findings 已暂缓/反证；最终仍需 full pass，或接受 gate 阻断。',
+      }
+    }
+  }
+  if (latest.verdict === 'nothing-to-review') {
+    const previous = [...rounds]
+      .sort((a, b) => b.round - a.round)
+      .find((candidate) => candidate.round < latest.round && candidate.status === 'ready-for-verification')
+    if (previous) {
+      return {
+        key: 'range',
+        tone: 'warn',
+        label: '用 range 复检上次修复',
+        detail: '工作区已干净；用 -Mode range 覆盖上次修复的提交区间，确认 findings 已消失。',
+      }
+    }
+  }
   const mustFix = (latest.counts?.critical || 0) + (latest.counts?.important || 0)
   if (latest.verdict === 'fix' || latest.verdict === 'reject') {
     return {
@@ -474,6 +598,7 @@ async function readTaskDetail(taskDir, storage = 'trellis', entryName = '') {
       reportPath: String(row.report ?? ''),
       files: Number(row.files ?? report?.meta?.files ?? 0),
       truncated: Boolean(row.truncated ?? report?.meta?.truncated),
+      failOn: Array.isArray(report?.meta?.failOn) && report.meta.failOn.length > 0 ? report.meta.failOn.map(String) : null,
       counts: {
         critical: Number(row.critical ?? 0),
         important: Number(row.important ?? 0),
@@ -490,16 +615,22 @@ async function readTaskDetail(taskDir, storage = 'trellis', entryName = '') {
         ? report.review.recommendations.map(String).filter(Boolean)
         : [],
       issues: Array.isArray(report?.review?.issues)
-        ? report.review.issues.map((issue, index) => ({
-            index,
-            key: String(issue?.key ?? ''),
-            severity: String(issue?.severity ?? ''),
-            file: String(issue?.file ?? ''),
-            line: String(issue?.line ?? ''),
-            issue: String(issue?.issue ?? ''),
-            why: String(issue?.why ?? ''),
-            fix: String(issue?.fix ?? ''),
-          }))
+        ? report.review.issues.flatMap((issue, index) =>
+            issue == null || typeof issue !== 'object'
+              ? []
+              : [
+                  {
+                    index,
+                    key: String(issue?.key ?? ''),
+                    severity: String(issue?.severity ?? ''),
+                    file: String(issue?.file ?? ''),
+                    line: String(issue?.line ?? ''),
+                    issue: String(issue?.issue ?? ''),
+                    why: String(issue?.why ?? ''),
+                    fix: String(issue?.fix ?? ''),
+                  },
+                ],
+          )
         : [],
     })
   }
@@ -543,17 +674,29 @@ async function readTaskDetail(taskDir, storage = 'trellis', entryName = '') {
         status = 'unreviewed'
         note = '后续没有可对照的轮次'
       }
-      return { ...issue, disposition: { status, source, note } }
+      return { ...issue, followUp: match?.state ?? '', disposition: { status, source, note } }
     })
   }
 
   deriveLifecycles(rounds, reportedRounds)
 
+  for (const round of rounds) {
+    for (const issue of round.issues) issue.status = deriveIssueStatus(issue)
+    const roundState = deriveRoundStatus(round, round.failOn ?? DEFAULT_FAIL_ON)
+    round.status = roundState.status
+    round.openBlocking = roundState.openBlocking
+    round.fixedBlocking = roundState.fixed
+    round.verifiedBlocking = roundState.verified
+    round.deferredBlocking = roundState.deferred + roundState.counterEvidence
+    round.reopenedBlocking = roundState.reopened
+    round.minorOpen = roundState.minorOpen
+  }
+
   const gate = deriveGate(history)
   const latest = rounds.length > 0 ? rounds[rounds.length - 1] : null
   const totalCostUsd = rounds.reduce((sum, round) => sum + (Number(round.costUsd) || 0), 0)
   const totalCostKnown = rounds.every((round) => round.costKnown !== false)
-  const pending = latest ? (latest.counts.critical || 0) + (latest.counts.important || 0) : 0
+  const pending = latest ? Number(latest.openBlocking) || 0 : 0
   const detail = {
     task: {
       dir: taskDir,
@@ -582,6 +725,7 @@ async function readTaskDetail(taskDir, storage = 'trellis', entryName = '') {
 }
 
 function summaryOf(detail, mtimeMs = 0) {
+  const latest = detail.rounds.length > 0 ? detail.rounds[detail.rounds.length - 1] : null
   return {
     name: detail.task.name,
     title: detail.task.title || detail.task.name,
@@ -589,6 +733,7 @@ function summaryOf(detail, mtimeMs = 0) {
     priority: detail.task.priority,
     lastRound: detail.lastRound,
     rounds: detail.rounds.length,
+    roundStatus: latest ? latest.status : '',
     gate: detail.gate,
     pending: detail.pending,
     lastVerdict: detail.lastVerdict,

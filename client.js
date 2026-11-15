@@ -114,6 +114,15 @@ window.__ModuleLoader__.load({
 .crc-advice-assessment { margin:6px 0 0; }
 .crc-round-meta { display:flex; gap:14px; flex-wrap:wrap; margin-top:8px; color:var(--crc-muted); font-size:11.5px; font-variant-numeric:tabular-nums; }
 .crc-issues { list-style:none; margin:10px 0 0; padding:0; }
+.crc-board { display:grid; grid-template-columns:repeat(5,minmax(0,1fr)); gap:8px; margin-top:10px; }
+.crc-board-col { min-width:0; border:1px solid var(--crc-border); border-radius:8px; background:var(--crc-surface-2); padding:8px; }
+.crc-board-head { display:flex; align-items:center; justify-content:space-between; gap:6px; margin-bottom:6px; color:var(--crc-muted); font-size:11px; }
+.crc-board-head b { color:var(--crc-text); font-weight:600; }
+.crc-board-list { list-style:none; margin:0; padding:0; }
+.crc-board .crc-issue + .crc-issue { border-top:1px solid var(--crc-border); }
+.crc-board .crc-issue-head { padding:7px 0; }
+.crc-board .crc-issue-text { flex-basis:100%; }
+.crc-board-empty { color:var(--crc-muted); font-size:11px; padding:4px 0; }
 .crc-issue + .crc-issue { border-top:1px solid var(--crc-border); }
 .crc-issue-head { width:100%; appearance:none; border:0; background:transparent; color:inherit; font:inherit; text-align:left; display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; padding:9px 0; cursor:pointer; }
 .crc-issue-head:focus-visible { outline:2px solid var(--crc-brand); outline-offset:1px; }
@@ -193,6 +202,7 @@ window.__ModuleLoader__.load({
 @media (max-width:960px) {
   .crc-grid, .crc-skel-grid { grid-template-columns:minmax(0,1fr); }
   .crc-aside { position:static; }
+  .crc-board { grid-template-columns:repeat(2,minmax(0,1fr)); }
 }
 @media (max-width:720px) {
   .crc-rail { grid-template-columns:repeat(2,minmax(0,1fr)); }
@@ -208,6 +218,7 @@ window.__ModuleLoader__.load({
   .crc-round-head { gap:7px; }
   .crc-round-cost { display:none; }
   .crc-loc { max-width:100%; }
+  .crc-board { grid-template-columns:minmax(0,1fr); }
 }
 @media (prefers-reduced-motion:reduce) {
   .crc-root *, .crc-root *::before, .crc-root *::after { animation-duration:.001ms !important; animation-iteration-count:1 !important; transition-duration:.001ms !important; scroll-behavior:auto !important; }
@@ -267,6 +278,22 @@ window.__ModuleLoader__.load({
       reopened: ['复发', 'bad'],
       unreviewed: ['未复检', 'idle'],
       unknown: ['—', 'idle'],
+    }
+    const ISSUE_STATUS_META = {
+      open: ['待处理', 'bad'],
+      fixed: ['待复检', 'warn'],
+      verified: ['已验证', 'ok'],
+      reopened: ['复现', 'bad'],
+      deferred: ['已暂缓', 'idle'],
+      'counter-evidence': ['已反证', 'warn'],
+    }
+    const ROUND_STATUS_META = {
+      open: ['待处置', 'bad'],
+      fixing: ['处置中', 'warn'],
+      'ready-for-verification': ['待复检', 'warn'],
+      verified: ['已关闭', 'ok'],
+      reopened: ['复现', 'bad'],
+      'closed-with-risk': ['带风险关闭', 'idle'],
     }
     const STORAGE_META = {
       trellis: ['Trellis', 'brand'],
@@ -454,7 +481,9 @@ window.__ModuleLoader__.load({
       const rounds = props.rounds
       const latest = props.latest
       const gate = meta(GATE_META, active?.gate?.state, '未判定')
-      const mustFix = latest ? (latest.counts?.critical || 0) + (latest.counts?.important || 0) : null
+      const mustFix = latest ? Number(latest.openBlocking) || 0 : null
+      const fixedPending = latest ? Number(latest.fixedBlocking) || 0 : 0
+      const verifiedCount = latest ? Number(latest.verifiedBlocking) || 0 : 0
       const gateSub = latest
         ? `最近 ${modeLabel(latest.mode)} ${meta(VERDICT_META, latest.verdict)[0]}`
         : '还没有审核记录'
@@ -479,9 +508,9 @@ window.__ModuleLoader__.load({
           sub: latest ? `最近 #${latest.round}，${totalText}` : '等待第一次审核',
         }),
         h(RailCell, {
-          label: '待修问题',
+          label: '待处置问题',
           value: mustFix === null ? '—' : String(mustFix),
-          sub: latest ? `严重 ${latest.counts?.critical || 0}，重要 ${latest.counts?.important || 0}` : '暂无待修',
+          sub: latest ? `待复检 ${fixedPending} · 已验证 ${verifiedCount}` : '暂无待处置',
         }),
         h(RailCell, {
           label: '最近审核',
@@ -523,9 +552,7 @@ window.__ModuleLoader__.load({
       const [open, setOpen] = React.useState(false)
       const severity = meta(SEVERITY_META, issue.severity, '次要')
       const disposition = issue.disposition ? meta(DISPOSITION_META, issue.disposition.status) : null
-      const lifecycle = issue.lifecycle ? meta(LIFECYCLE_META, issue.lifecycle.state) : null
-      const hasLifecycle = lifecycle && lifecycle[0] !== '—'
-      const recorded = disposition && issue.disposition?.source === 'recorded' ? disposition : null
+      const statusMeta = meta(ISSUE_STATUS_META, issue.status)
       const cycle = issue.lifecycle
       const cycleText =
         cycle && cycle.state !== 'unknown'
@@ -552,11 +579,7 @@ window.__ModuleLoader__.load({
           h('span', { className: `crc-sev crc-sev-${severity[1]}` }, severity[0]),
           h('span', { className: 'crc-loc', title: issue.file }, `${issue.file || '—'}${issue.line ? `:${issue.line}` : ''}`),
           h('span', { className: 'crc-issue-text' }, issue.issue || '(无描述)'),
-          hasLifecycle ? h(Pill, { tone: lifecycle[1], title: cycleText || lifecycle[0] }, lifecycle[0]) : null,
-          recorded ? h(Pill, { tone: recorded[1], title: dispositionText }, recorded[0]) : null,
-          !hasLifecycle && !recorded && disposition
-            ? h(Pill, { tone: disposition[1], title: dispositionText }, disposition[0])
-            : null,
+          h(Pill, { tone: statusMeta[1], title: `问题状态 ${statusMeta[0]}` }, statusMeta[0]),
           h(ChevronIcon, { className: 'crc-chevron crc-chevron-sm' }),
         ),
         open
@@ -611,8 +634,22 @@ window.__ModuleLoader__.load({
       const round = props.round
       const [open, setOpen] = React.useState(Boolean(props.latest))
       const verdict = meta(VERDICT_META, round.verdict)
+      const roundStatusMeta = meta(ROUND_STATUS_META, round.status)
       const counts = round.counts || {}
       const issues = Array.isArray(round.issues) ? round.issues : []
+      const board = [
+        { key: 'open', label: '待处理' },
+        { key: 'fixed', label: '待复检' },
+        { key: 'verified', label: '已验证' },
+        { key: 'reopened', label: '复现' },
+        { key: 'deferred', label: '暂缓/反证' },
+      ]
+      const boardGroups = new Map(board.map((column) => [column.key, []]))
+      for (const issue of issues) {
+        const key = issue.status === 'counter-evidence' ? 'deferred' : issue.status
+        const group = boardGroups.get(key) || boardGroups.get('open')
+        group.push(issue)
+      }
       return h(
         'article',
         { className: cx('crc-round', props.latest && 'crc-round-latest') },
@@ -630,6 +667,7 @@ window.__ModuleLoader__.load({
             },
             h('span', { className: 'crc-round-no' }, `#${round.round}`),
             h(Pill, { tone: verdict[1], title: `结论 ${round.verdict || '未知'}` }, verdict[0]),
+            h(Pill, { tone: roundStatusMeta[1], title: `本轮状态 ${roundStatusMeta[0]}` }, roundStatusMeta[0]),
             h('span', { className: 'crc-round-mode', title: `模式 ${round.mode || '未知'}` }, modeLabel(round.mode)),
             round.transport ? h('span', { className: 'crc-round-transport', title: `传输 ${round.transport}` }, String(round.transport).toUpperCase()) : null,
             round.truncated ? h(Pill, { tone: 'bad', title: 'diff 被截断，结论不完整' }, '截断') : null,
@@ -670,10 +708,28 @@ window.__ModuleLoader__.load({
                 issues.length === 0
                   ? h('p', { className: 'crc-note' }, '本轮没有条目化问题。')
                   : h(
-                      'ul',
-                      { className: 'crc-issues' },
-                      issues.map((issue) =>
-                        h(IssueItem, { key: issue.key || `${round.round}-${issue.index}`, issue }),
+                      'div',
+                      { className: 'crc-board' },
+                      board.map((column) =>
+                        h(
+                          'div',
+                          { className: 'crc-board-col', key: column.key },
+                          h(
+                            'div',
+                            { className: 'crc-board-head' },
+                            h('b', null, column.label),
+                            h('span', null, boardGroups.get(column.key).length),
+                          ),
+                          boardGroups.get(column.key).length > 0
+                            ? h(
+                                'ul',
+                                { className: 'crc-board-list' },
+                                boardGroups.get(column.key).map((issue) =>
+                                  h(IssueItem, { key: issue.key || `${round.round}-${issue.index}`, issue }),
+                                ),
+                              )
+                            : h('span', { className: 'crc-board-empty' }, '无'),
+                        ),
                       ),
                     ),
               )
@@ -744,7 +800,14 @@ window.__ModuleLoader__.load({
             },
             h('span', { className: 'crc-task-title' }, task.title || task.name),
             h(Pill, { tone: taskGate[1], title: `门禁 ${taskGate[0]}` }, taskGate[0]),
-            task.pending > 0 ? h('span', { className: 'crc-task-pending' }, `${task.pending} 待修`) : null,
+            task.roundStatus
+              ? h(
+                  Pill,
+                  { tone: meta(ROUND_STATUS_META, task.roundStatus)[1], title: '本轮状态' },
+                  meta(ROUND_STATUS_META, task.roundStatus)[0],
+                )
+              : null,
+            task.pending > 0 ? h('span', { className: 'crc-task-pending' }, `${task.pending} 待处置`) : null,
             task.lastRound ? h('span', { className: 'crc-task-round' }, `#${task.lastRound}`) : null,
           ),
         )
@@ -768,6 +831,18 @@ window.__ModuleLoader__.load({
                   h('strong', { className: 'crc-next-label' }, next.label || '继续'),
                 ),
                 next.detail ? h('p', { className: 'crc-note' }, next.detail) : null,
+                next.key === 'fix'
+                  ? h(
+                      'p',
+                      { className: 'crc-note' },
+                      '处置用 ',
+                      h('span', { className: 'crc-code' }, 'claude_review_disposition'),
+                      ' 标记 fixed/deferred/counter-evidence。',
+                    )
+                  : null,
+                next.key === 'review'
+                  ? h('p', { className: 'crc-note' }, '复检本轮修复：用 claude_review 重跑同一模式；仍存在会标为复现。')
+                  : null,
               )
             : null,
           h(

@@ -415,6 +415,69 @@ function Get-RoundGuard([bool]$hadFailing) {
     return @{ consecutive = $consecutive; escalate = $escalate }
 }
 
+function Get-DispositionRows {
+    # 处置写入固定落在 <task>/review；不能用 -OutDir 覆盖，否则守卫查不到 disposition。
+    $path = Join-Path (Join-Path $taskPath 'review') 'dispositions.jsonl'
+    if (-not (Test-Path -LiteralPath $path)) { return @() }
+    $rows = @()
+    foreach ($line in (Get-Content -LiteralPath $path | Where-Object { $_.Trim() })) {
+        try { $rows += ($line | ConvertFrom-Json) } catch { }
+    }
+    return $rows
+}
+
+# 轮次门禁：上一轮还有未处置的 blocking findings，就不允许进入下一轮。
+# “处置”是主代理的显式状态更新（fixed / deferred / counter-evidence），下一轮负责复检。
+function Assert-FindingsDisposed {
+    if ($Mode -eq 'gate') { return }
+    $lastReport = [string]$state.lastReport
+    if ([string]::IsNullOrWhiteSpace($lastReport)) { return }
+    if (-not (Test-Path -LiteralPath $lastReport)) { return }
+    $report = $null
+    try { $report = Get-Content -LiteralPath $lastReport -Raw | ConvertFrom-Json } catch { return }
+    $issues = @($report.review.issues)
+    if ($issues.Count -eq 0) { return }
+
+    # 用报告落盘时的 failOn 判定 blocking，与面板 round.failOn 同源；
+    # 配置在上一轮之后被改动时，不能拿新配置去解释旧报告。
+    $reportFailOn = @($report.meta.failOn | Where-Object { $_ })
+    if ($reportFailOn.Count -eq 0) { $reportFailOn = @($failOn) }
+
+    $blocking = @()
+    for ($i = 0; $i -lt $issues.Count; $i++) {
+        if ($null -eq $issues[$i]) { continue }
+        $severity = ([string]$issues[$i].severity).Trim().ToLowerInvariant()
+        if ($reportFailOn -notcontains $severity) { continue }
+        $blocking += [pscustomobject]@{ issue = $issues[$i]; index = $i }
+    }
+    if ($blocking.Count -eq 0) { return }
+
+    # 轮次号以报告自身为准：nothing-to-review 会递增 state.round，但 lastReport 仍指向上一份报告。
+    $roundNo = if ($report.meta -and $report.meta.round) { [int]$report.meta.round } else { 0 }
+    if ($roundNo -le 0) { $roundNo = [int]$state.round }
+    $dispositions = @(Get-DispositionRows)
+    $missing = @()
+    foreach ($item in $blocking) {
+        $key = [string]$item.issue.key
+        $index = [int]$item.index
+        $hit = $false
+        foreach ($row in $dispositions) {
+            if ([string]$row.status -notin @('fixed', 'counter-evidence', 'deferred')) { continue }
+            if ([int]$row.round -ne $roundNo) { continue }
+            if ($key -ne '' -and [string]$row.key -eq $key) { $hit = $true; break }
+            $rowIndex = $row.index
+            if ($null -ne $rowIndex -and [string]$rowIndex -ne '' -and [int]$rowIndex -eq $index) { $hit = $true; break }
+        }
+        if (-not $hit) { $missing += $item }
+    }
+    if ($missing.Count -eq 0) { return }
+
+    $labels = @($missing | ForEach-Object { "$([string]$_.issue.severity) $([string]$_.issue.file):$([string]$_.issue.line) $([string]$_.issue.key)" }) -join '；'
+    Fail "第 $roundNo 轮还有 $($missing.Count) 条未处置的 blocking findings（$labels）。先修复并用 claude_review_disposition 标记 fixed/deferred/counter-evidence，再进入下一轮；本轮未调用模型。"
+}
+
+Assert-FindingsDisposed
+
 # ---------------------------------------------------------------- 2. 快照
 function Get-WorktreeTree([string]$repoRoot, [string[]]$exclude = @()) {
     # 临时索引放在系统临时目录：放进仓库内会被 git add -A 当成未跟踪文件，导致快照每次都不一致
@@ -692,10 +755,10 @@ if ([string]::IsNullOrWhiteSpace($diffText)) {
     $state.round = $cleanRound
     $state.lastMode = $Mode
     $state.lastVerdict = 'nothing-to-review'
-    # 空 diff 不能保留上一轮 full 的缓存键：否则下一次相同 diff 的 full 会复用旧结论，
-    # 而 history 最后一行已经是 nothing-to-review（缓存错轮 + gate 永久卡死）。
+    # 空 diff 不能保留上一轮 full 的缓存键：否则下一次相同 diff 的 full 会复用旧结论。
+    # 但 lastReport 必须保留：轮次守卫下一次还要用它判断上一轮 findings 是否已处置；
+    # 清空会让 nothing-to-review 变成绕过 V2 门禁的“洗白轮”。
     $state.lastInputHash = ''
-    $state.lastReport = ''
     $state.updatedAt = (Get-Date).ToString('s')
     if ($snapshotOk -and $headRev -and $Mode -ne 'range') { $state.lastSnapshot = $headRev }
     [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
@@ -1625,6 +1688,7 @@ $reportObj = [ordered]@{
         rangeDirty  = $rangeDirty
         rangeHeadMismatch = $rangeHeadMismatch
         profile     = $Profile
+        failOn      = @($failOn)
         transport   = $transportUsed
         roleMode    = $roleMode
         transportWarning = $transportWarning

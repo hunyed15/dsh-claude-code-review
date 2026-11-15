@@ -16,7 +16,17 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { appendDispositions, deriveLifecycles, deriveNextAction, loadPanel, matchFollowUp, resolveTaskDir, textSimilarity } from '../panel.js'
+import {
+  appendDispositions,
+  deriveIssueStatus,
+  deriveLifecycles,
+  deriveNextAction,
+  deriveRoundStatus,
+  loadPanel,
+  matchFollowUp,
+  resolveTaskDir,
+  textSimilarity,
+} from '../panel.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const PACKAGE_DIR = dirname(HERE)
@@ -470,6 +480,172 @@ function check(name, condition, detail) {
     check('I1 真实仓库可读', panel?.ok === true && Array.isArray(panel.tasks))
     check('I2 有活动任务或至少有任务列表', Boolean(panel) && (panel.active !== null || panel.tasks.length > 0))
   }
+}
+
+// K. 缺陷全流程：issue 状态机 / round 状态机 / nextAction
+{
+  const issue = (over = {}) => ({ key: 'k', severity: 'critical', file: 'a.js', line: '1', issue: 'x', ...over })
+  const disp = (status) => ({ disposition: { status, source: 'recorded', note: '' } })
+
+  check('K1 显式 fixed + 下一轮消失 → verified', deriveIssueStatus({ ...issue(), ...disp('fixed'), followUp: 'gone' }) === 'verified')
+  check('K2 显式 fixed + 下一轮仍存在 → reopened', deriveIssueStatus({ ...issue(), ...disp('fixed'), followUp: 'still-there' }) === 'reopened')
+  check('K3 显式 fixed + 无后续 → fixed', deriveIssueStatus({ ...issue(), ...disp('fixed') }) === 'fixed')
+  check('K4 无处置 + 下一轮消失 → verified', deriveIssueStatus({ ...issue(), followUp: 'gone' }) === 'verified')
+  check('K5 无处置 + 下一轮仍存在 → reopened', deriveIssueStatus({ ...issue(), followUp: 'still-there' }) === 'reopened')
+  check('K6 deferred → deferred', deriveIssueStatus({ ...issue(), ...disp('deferred') }) === 'deferred')
+  check('K7 无处置/无后续 → open', deriveIssueStatus(issue()) === 'open')
+
+  check('K8 未处置 blocking → open', deriveRoundStatus({ round: 1, issues: [issue({ status: 'open' })] }).status === 'open')
+  check(
+    'K9 部分处置 → fixing',
+    deriveRoundStatus({ round: 1, issues: [issue({ status: 'fixed' }), issue({ key: 'k2', status: 'open' })] }).status === 'fixing',
+  )
+  check('K10 全部 fixed → ready-for-verification', deriveRoundStatus({ round: 1, issues: [issue({ status: 'fixed' })] }).status === 'ready-for-verification')
+  check(
+    'K11 verified + minor → verified',
+    deriveRoundStatus({ round: 1, issues: [issue({ status: 'verified' }), issue({ key: 'm', severity: 'minor', status: 'open' })] }).status === 'verified',
+  )
+  check('K12 deferred → closed-with-risk', deriveRoundStatus({ round: 1, issues: [issue({ status: 'deferred' })] }).status === 'closed-with-risk')
+  check('K13 reopened → reopened', deriveRoundStatus({ round: 1, issues: [issue({ status: 'reopened' })] }).status === 'reopened')
+  check('K14 只有 minor open → verified（不阻断）', deriveRoundStatus({ round: 1, issues: [issue({ key: 'm', severity: 'minor', status: 'open' })] }).status === 'verified')
+
+  const openAction = deriveNextAction({
+    rounds: [{ round: 1, verdict: 'fix', mode: 'full', counts: { critical: 1 }, issues: [issue({ status: 'open' })] }],
+    gate: { state: 'blocked' },
+  })
+  check(
+    'K15 nextAction 未处置 → fix + 处置提示',
+    openAction.key === 'fix' && openAction.label.includes('处置') && openAction.detail.includes('claude_review_disposition'),
+    JSON.stringify(openAction),
+  )
+  const readyAction = deriveNextAction({
+    rounds: [{ round: 1, verdict: 'fix', mode: 'full', counts: { critical: 1 }, issues: [issue({ status: 'fixed' })] }],
+    gate: { state: 'blocked' },
+  })
+  check('K16 nextAction 全部 fixed → review（复检）', readyAction.key === 'review' && readyAction.label.includes('复检'), JSON.stringify(readyAction))
+  const riskAction = deriveNextAction({
+    rounds: [{ round: 1, verdict: 'fix', mode: 'full', counts: { critical: 1 }, issues: [issue({ status: 'deferred' })] }],
+    gate: { state: 'blocked' },
+  })
+  check('K17 nextAction deferred → gate（风险提示）', riskAction.key === 'gate' && riskAction.detail.includes('暂缓'), JSON.stringify(riskAction))
+  const rangeAction = deriveNextAction({
+    rounds: [
+      { round: 1, verdict: 'fix', mode: 'full', counts: { critical: 1 }, status: 'ready-for-verification', issues: [issue({ status: 'fixed' })] },
+      { round: 2, verdict: 'nothing-to-review', mode: 'full', counts: {}, issues: [] },
+    ],
+    gate: { state: 'pass' },
+  })
+  check('K18 nextAction nothing + 上轮 ready → range', rangeAction.key === 'range' && rangeAction.detail.includes('-Mode range'), JSON.stringify(rangeAction))
+}
+
+// L. loadPanel 全流程：issue/round 状态与 nextAction 串联
+{
+  const critical = { key: 'k1', severity: 'critical', file: 'a.js', line: '1', issue: '空指针', why: '会崩', fix: '判空' }
+  async function flowPanel({ review2 = 'none', disposition = null, failOn = null, severity = 'critical', withNull = false } = {}) {
+    const root = await mkdtemp(join(tmpdir(), 'crc-flow-'))
+    const taskDir = join(root, '.trellis', 'tasks', 'flow')
+    const reviewDir = join(taskDir, 'review')
+    const issue = { ...critical, severity }
+    const meta = failOn ? { failOn } : {}
+    await mkdir(reviewDir, { recursive: true })
+    await writeFile(join(taskDir, 'task.json'), JSON.stringify({ title: '流程任务', status: 'in_progress' }))
+    const rows = [
+      JSON.stringify({
+        at: '2026-11-12T10:00:00',
+        round: 1,
+        mode: 'full',
+        verdict: 'fix',
+        critical: severity === 'critical' ? 1 : 0,
+        important: severity === 'important' ? 1 : 0,
+        minor: 0,
+        files: 1,
+      }),
+    ]
+    const firstIssues = withNull ? [null, issue] : [issue]
+    await writeFile(join(reviewDir, 'review-1.json'), JSON.stringify({ meta, review: { verdict: 'fix', summary: '发现空指针', issues: firstIssues } }))
+    if (review2 !== 'none') {
+      const verdict = review2 === 'pass' ? 'pass' : review2 === 'nothing' ? 'nothing-to-review' : 'fix'
+      rows.push(
+        JSON.stringify({
+          at: '2026-11-12T10:10:00',
+          round: 2,
+          mode: 'full',
+          verdict,
+          critical: review2 === 'still' && severity === 'critical' ? 1 : 0,
+          important: review2 === 'still' && severity === 'important' ? 1 : 0,
+          minor: 0,
+          files: 1,
+        }),
+      )
+      if (review2 !== 'nothing') {
+        await writeFile(
+          join(reviewDir, 'review-2.json'),
+          JSON.stringify({ meta, review: { verdict, summary: '复检', issues: review2 === 'still' ? [issue] : [] } }),
+        )
+      }
+    }
+    await writeFile(join(reviewDir, 'history.jsonl'), rows.join('\n') + '\n')
+    if (disposition) {
+      await writeFile(join(reviewDir, 'dispositions.jsonl'), JSON.stringify({ round: 1, key: 'k1', status: disposition, note: '已处理' }) + '\n')
+    }
+    const panel = await loadPanel(root)
+    await rm(root, { recursive: true, force: true })
+    return panel
+  }
+
+  const verified = await flowPanel({ review2: 'pass', disposition: 'fixed' })
+  const v1 = verified.active.rounds.find((round) => round.round === 1)
+  const v2 = verified.active.rounds.find((round) => round.round === 2)
+  check('L1 复检通过 → issue verified', v1.issues[0].status === 'verified', JSON.stringify(v1.issues[0]))
+  check('L2 round 1 verified', v1.status === 'verified', JSON.stringify(v1))
+  check('L3 round 2 verified/pass', v2.status === 'verified' && v2.verdict === 'pass')
+  check('L4 pending 归零', verified.active.pending === 0, JSON.stringify(verified.active.pending))
+  check('L5 nextAction gate', verified.active.nextAction.key === 'gate', JSON.stringify(verified.active.nextAction))
+
+  const ready = await flowPanel({ disposition: 'fixed' })
+  const r1 = ready.active.rounds.find((round) => round.round === 1)
+  check('L6 已修待复检 → issue fixed', r1.issues[0].status === 'fixed', JSON.stringify(r1.issues[0]))
+  check('L7 已修待复检 → round ready-for-verification', r1.status === 'ready-for-verification', JSON.stringify(r1))
+  check('L8 已修待复检 → nextAction review', ready.active.nextAction.key === 'review', JSON.stringify(ready.active.nextAction))
+
+  const ntr = await flowPanel({ review2: 'nothing', disposition: 'fixed' })
+  const n1 = ntr.active.rounds.find((round) => round.round === 1)
+  check('L9 nothing 不算复检 → issue fixed', n1.issues[0].status === 'fixed', JSON.stringify(n1.issues[0]))
+  check('L10 nothing 后 → nextAction range', ntr.active.nextAction.key === 'range', JSON.stringify(ntr.active.nextAction))
+
+  const still = await flowPanel({ review2: 'still', disposition: 'fixed' })
+  const s1 = still.active.rounds.find((round) => round.round === 1)
+  check('L11 复检仍存在 → issue reopened', s1.issues[0].status === 'reopened', JSON.stringify(s1.issues[0]))
+  check('L12 复检仍存在 → round reopened', s1.status === 'reopened', JSON.stringify(s1))
+
+  const deferred = await flowPanel({ disposition: 'deferred' })
+  const d1 = deferred.active.rounds.find((round) => round.round === 1)
+  check('L13 deferred → issue deferred', d1.issues[0].status === 'deferred', JSON.stringify(d1.issues[0]))
+  check('L14 deferred → round closed-with-risk', d1.status === 'closed-with-risk', JSON.stringify(d1))
+  check('L15 deferred → nextAction gate', deferred.active.nextAction.key === 'gate', JSON.stringify(deferred.active.nextAction))
+
+  const open = await flowPanel()
+  const o1 = open.active.rounds.find((round) => round.round === 1)
+  check('L16 未处置 → issue open', o1.issues[0].status === 'open', JSON.stringify(o1.issues[0]))
+  check('L17 未处置 → round open', o1.status === 'open', JSON.stringify(o1))
+  check('L18 未处置 → nextAction fix', open.active.nextAction.key === 'fix', JSON.stringify(open.active.nextAction))
+
+  const custom = await flowPanel({ failOn: ['critical'], severity: 'important' })
+  const c1 = custom.active.rounds.find((round) => round.round === 1)
+  check(
+    'L19 自定义 failOn=critical → important 不阻断',
+    c1.status === 'verified' && c1.openBlocking === 0 && custom.active.pending === 0,
+    JSON.stringify({ status: c1.status, openBlocking: c1.openBlocking, pending: custom.active.pending, meta: c1.failOn }),
+  )
+  check('L20 自定义 failOn → nextAction 不要求处置', custom.active.nextAction.key === 'gate', JSON.stringify(custom.active.nextAction))
+
+  const nullIssue = await flowPanel({ withNull: true })
+  const nullR1 = nullIssue.active.rounds.find((round) => round.round === 1)
+  check(
+    'L21 null issue 不生成幻影条目且保留原始 index',
+    nullR1.issues.length === 1 && nullR1.issues[0].index === 1,
+    JSON.stringify(nullR1.issues),
+  )
 }
 
 console.log('')

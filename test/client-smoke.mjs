@@ -68,6 +68,26 @@ function check(name, condition, detail) {
   check('C14 全未知成本不显示 $0.00', source.includes("totalKnown ? '$0.00' : '成本 —'"), 'unknown cost still $0.00')
 }
 
+// 5. 缺陷全流程看板（issue 状态、round 状态、board、下一步处置）
+{
+  check(
+    'C15 有 issue 状态映射',
+    source.includes('ISSUE_STATUS_META') && source.includes('待复检') && source.includes('复现'),
+    'missing issue status meta',
+  )
+  check(
+    'C16 有 round 状态映射',
+    source.includes('ROUND_STATUS_META') && source.includes('待处置') && source.includes('已关闭'),
+    'missing round status meta',
+  )
+  check('C17 有 board 列', source.includes('crc-board') && source.includes('crc-board-col'), 'missing board')
+  check(
+    'C18 下一步提示处置与复检',
+    source.includes('claude_review_disposition') && source.includes('复检本轮修复'),
+    'missing dispose/review action',
+  )
+}
+
 console.log('')
 console.log(`结果: passed=${passed} failed=${failures.length}`)
 for (const failure of failures) console.log(`  FAIL ${failure}`)
