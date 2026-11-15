@@ -198,7 +198,7 @@ Host 路由（本插件注册的 webServer resource）
 - **看板列**：待处理 / 待复检 / 已验证 / 复现 / 暂缓·反证；轮次头显示本轮状态。
 - **下一步**：未处置 → 修复并处置；全部 fixed → 复检本轮修复；deferred/反证 → 门禁风险提示；`nothing-to-review` 但上一轮待复检 → 用 `-Mode range` 复检上次修复；全绿 → gate。
 - **minor 不阻断**：只有 minor 的轮次可以关闭；仍显示在「待处理」列，由人决定修/暂缓。
-- **failOn 口径**：引擎把生效的 `failOn` 写进 `review-N.json` 的 `meta`；面板和轮次守卫都用报告里的 `failOn` 判断 blocking（默认 critical/important），配置改动不会让旧报告 fail-open。
+- **failOn 口径**：引擎把生效的 `failOn` 写进 `review-N.json` 的 `meta`；面板和轮次守卫都用报告里的 `failOn` 判断 blocking。旧报告没有 `meta.failOn` 时，两边都回退到默认 `critical/important`，当前配置只影响新报告，不会改写旧报告。
 - **fixed 只是声明**：下一轮负责复检；复检仍在会变 `reopened`，不会把「已修」直接当「已关闭」。
 
 ### 轮次门禁（V2）
@@ -230,22 +230,22 @@ Host 路由（本插件注册的 webServer resource）
 ```powershell
 pwsh -NoProfile -File test/engine-gate.ps1   # 55 个断言：gate 快照/历史/本地/Trellis、range、截断、scope、任务解析
 pwsh -NoProfile -File test/engine-cache.ps1  # 8 个断言：fake Claude 验证缓存、空 diff 清 hash、gate 可解锁
-pwsh -NoProfile -File test/engine-round-guard.ps1 # 21 个断言：V2 未处置 blocking 拒绝新 review、fixed/deferred/反证放行、跨轮/原始下标/gate/range、报告 failOn、nothing 保留 lastReport、nothing 后 fixed 复检放行
+pwsh -NoProfile -File test/engine-round-guard.ps1 # 22 个断言：V2 未处置 blocking 拒绝新 review、fixed/deferred/反证放行、跨轮/原始下标/gate/range、报告 failOn、nothing 保留 lastReport、旧报告回退默认 failOn
 pwsh -NoProfile -File test/engine-acp.ps1    # 10 个断言：fake ACP full/gate、空格路径、auto→CLI、超时/启动超时回退
 node test/tool-smoke.mjs                     # 59 个断言，约 10 秒
-node test/panel-smoke.mjs                    # 104 个断言（真实仓库断言可选，见下）
+node test/panel-smoke.mjs                    # 105 个断言（真实仓库断言可选，见下）
 node test/client-smoke.mjs                   # 18 个断言
 node test/acp-smoke.mjs                      # 13 个断言：role/budget extraArgs、只读权限、fs、真实 adapter 启动失败
 ```
 
 - `engine-gate`：在临时 git 仓库里直接跑引擎 gate，覆盖本地无历史/干净 → blocked（不能把没跑过当 pass）、full pass、快照不一致、incremental/fix/history 损坏/无历史有改动、Trellis pass、显式 trellis 缺 `.trellis`、range 提交区间与 dirty/head mismatch 标记、`full -Base`、截断 full pass 不过 gate、自定义 Base 的 full 不冒充收尾门禁、scope 不一致（含 dotfile / Windows 绝对路径 / 跨盘符 / 带空格 / 无扩展名 / 汉字紧贴路径 / 中文文件名正反向）、`-Head` 仅 range、gate 忽略 Base、忽略或已跟踪的本地账本都不导致快照漂移、跟踪的 review 文件不把 range 误判为 dirty、`SessionId → task.py current` 与「无活动任务不猜」。
 - `engine-cache`：用编译的 fake Claude 统计真实调用次数；相同 diff/输入第二次直接 cached（0 次新调用）但会按当前快照落一条零成本 history；中间插入空 diff 轮次会清掉旧 hash，随后相同 full 重新审核，gate 能正常通过。
-- `engine-round-guard`：V2 轮次门禁；未处置的 critical/important 直接拒绝新 full/range，fixed/deferred/counter-evidence 放行；跨轮 disposition、index 处置（含 null 前置时仍按 review-N.json 原始下标、报告自身 failOn）、只有 minor、上一轮 pass、没有 lastReport、gate 豁免、range 拒绝、nothing-to-review 保留 lastReport 都覆盖；不调用模型。
+- `engine-round-guard`：V2 轮次门禁；未处置的 critical/important 直接拒绝新 full/range，fixed/deferred/counter-evidence 放行；跨轮 disposition、index 处置（含 null 前置时仍按 review-N.json 原始下标、报告自身 failOn）、只有 minor、上一轮 pass、没有 lastReport、gate 豁免、range 拒绝、nothing-to-review 保留 lastReport、nothing 后 fixed 放行、旧报告无 failOn 时回退默认值都覆盖；不调用模型。
 - `engine-acp`：用 fake ACP agent（官方 SDK 的 agent 侧）驱动引擎 `-Transport acp` 的 full/gate，断言 `transport=acp`、报告 meta、gate 可通过；另覆盖含空格 cwd、auto→CLI、ACP 超时 fail-closed、adapter 启动即崩、bridge 启动超时仍回退 CLI 并带 `transportWarning`；不调用真实模型。
 - `acp-smoke`：真实 `scripts/acp-review.mjs` + 官方 SDK + fake ACP agent，断言初始化/会话/消息/结果 envelope，reviewer role 走 `session/new` 的 systemPrompt、read 允许、edit 拒绝、fs 读 line/limit、fs 写拒绝、启动失败 exit 3；并用**真实 adapter 入口**（缺 `CLAUDE_CODE_EXECUTABLE`）断言启动失败被归类为 exit 3。
 - `panel-smoke`：新增 `transportWarning` 透传与 ACP 未知成本时总成本标记为部分和；`client-smoke` 新增 `transportWarning`/部分成本渲染断言。
 - `tool-smoke`：命令行构造（含 `-Storage`/`-Base`/`-Head`/`-Profile`）、`fix`/`gate-blocked` 必须 `ok=false`、`exit 2` 必须抛错、`dryRun` 透传、旧引擎回退、缓存结果、引擎缺失可诊断、Trellis/本地处置写入，以及面板路由的授权/冷启动重试/大小写比较/本地模式。
-- `panel-smoke`：问题匹配、轮次聚合、处置叠加、生命周期（new/still/fixed/reopened/unreviewed + 换措辞聚类 + 空 file 无 key 保持 unknown / 有 key 仍跟踪）、缺陷全流程（issue 状态机、round 状态机、open/fixed/verified/reopened/deferred、待处置/待复检/带风险关闭、`nextAction` 的 fix/review/range、自定义 failOn、null issue 不生成幻影条目）、下一步动作（含 range、截断/自定义 Base/快照降级在 pass 与 nothing-to-review 两种状态下都重跑 full）、截断门禁、任务切换、Trellis 与本地账本、`nothing-to-review` 语义。真实仓库断言用 `CLAUDE_REVIEW_REPO=<Trellis 仓库>` 指定；未指定且包不在 Trellis 仓库内时记 SKIP。
+- `panel-smoke`：问题匹配、轮次聚合、处置叠加、生命周期（new/still/fixed/reopened/unreviewed + 换措辞聚类 + 空 file 无 key 保持 unknown / 有 key 仍跟踪）、缺陷全流程（issue 状态机、round 状态机、open/fixed/verified/reopened/deferred、待处置/待复检/带风险关闭、`nextAction` 的 fix/review/range、自定义 failOn、旧报告 failOn 回退、null issue 不生成幻影条目）、下一步动作（含 range、截断/自定义 Base/快照降级在 pass 与 nothing-to-review 两种状态下都重跑 full）、截断门禁、任务切换、Trellis 与本地账本、`nothing-to-review` 语义。真实仓库断言用 `CLAUDE_REVIEW_REPO=<Trellis 仓库>` 指定；未指定且包不在 Trellis 仓库内时记 SKIP。
 - `client-smoke`：静态检查客户端注入、`conversation.view` 注册、原生 style 注入与路由访问边界、transport/未知成本、缺陷看板（问题/轮次状态、看板列、处置/复检提示）。
 
 「真实 spawn 引擎跑一次 gate」在受限沙箱内可能被拒（Node 管道 spawn `EPERM`，已知边界），此时该用例记 SKIP；在沙箱外/危险全权限下会真正执行。

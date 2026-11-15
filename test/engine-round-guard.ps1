@@ -94,8 +94,9 @@ function Write-Dispositions([string]$repo, [object[]]$rows) {
     [IO.File]::WriteAllText((Join-Path $review 'dispositions.jsonl'), (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
 }
 
-function Invoke-Engine([string]$repo, [string]$mode = 'full', [switch]$DryRun, [string]$Base = '') {
-    $argv = @('-NoProfile', '-File', $engine, '-Mode', $mode, '-Cwd', $repo, '-Storage', 'local', '-Json')
+function Invoke-Engine([string]$repo, [string]$mode = 'full', [switch]$DryRun, [string]$Base = '', [string]$EnginePath = '') {
+    $exe = if ($EnginePath) { $EnginePath } else { $engine }
+    $argv = @('-NoProfile', '-File', $exe, '-Mode', $mode, '-Cwd', $repo, '-Storage', 'local', '-Json')
     if ($DryRun) { $argv += '-DryRun' }
     if ($Base) { $argv += @('-Base', $Base) }
     $out = & pwsh @argv 2>&1
@@ -206,6 +207,25 @@ try {
     # 14. nothing 之后保留 round=1 的 fixed，真实复检必须放行：轮次号以报告为准，不能用 state.round。
     Write-Dispositions $repo @([ordered]@{ round = 1; key = 'k1'; status = 'fixed' })
     Check 'G21 nothing 后 fixed(round=1) → 复检放行' ((Invoke-Engine $repo 'full' -DryRun).Code -ne 2)
+
+    # 15. 旧报告没有 meta.failOn 时，守卫回退必须与面板一致（默认 critical/important），
+    #     不能被当前自定义 config.failOn 改写。
+    $customDir = Join-Path $env:TEMP ("crc-custom-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path $customDir -Force | Out-Null
+    Copy-Item -LiteralPath $engine -Destination (Join-Path $customDir 'engine.ps1')
+    Copy-Item -LiteralPath (Join-Path $packageRoot 'scripts/reviewer-role.md') -Destination $customDir
+    Copy-Item -LiteralPath (Join-Path $packageRoot 'scripts/review-schema.json') -Destination $customDir
+    [IO.File]::WriteAllText(
+        (Join-Path $customDir 'config.json'),
+        (@{ failOn = @('critical'); reviewerRoleFile = 'reviewer-role.md' } | ConvertTo-Json),
+        (New-Object Text.UTF8Encoding($false))
+    )
+    $oldReport = Write-Report $repo 1 'fix' @($important)
+    Write-State $repo 1 $oldReport
+    Write-History $repo 1 $oldReport
+    Write-Dispositions $repo @()
+    Check 'G22 旧报告无 failOn + 自定义 config → 默认阻断' ((Invoke-Engine $repo 'full' -DryRun -EnginePath (Join-Path $customDir 'engine.ps1')).Code -eq 2)
+    Remove-Item -LiteralPath $customDir -Recurse -Force -ErrorAction SilentlyContinue
 } finally {
     Remove-Item -LiteralPath $repo -Recurse -Force -ErrorAction SilentlyContinue
 }

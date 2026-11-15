@@ -646,6 +646,14 @@ function check(name, condition, detail) {
     nullR1.issues.length === 1 && nullR1.issues[0].index === 1,
     JSON.stringify(nullR1.issues),
   )
+
+  const oldReport = await flowPanel({ severity: 'important' })
+  const oldR1 = oldReport.active.rounds.find((round) => round.round === 1)
+  check(
+    'L22 旧报告无 failOn + important → 面板按默认 blocking',
+    oldR1.status === 'open' && oldR1.openBlocking === 1 && oldReport.active.nextAction.key === 'fix',
+    JSON.stringify({ status: oldR1.status, openBlocking: oldR1.openBlocking, next: oldReport.active.nextAction.key }),
+  )
 }
 
 console.log('')

@@ -438,10 +438,10 @@ function Assert-FindingsDisposed {
     $issues = @($report.review.issues)
     if ($issues.Count -eq 0) { return }
 
-    # 用报告落盘时的 failOn 判定 blocking，与面板 round.failOn 同源；
-    # 配置在上一轮之后被改动时，不能拿新配置去解释旧报告。
+    # 旧报告没有 meta.failOn 时，回退必须与面板 DEFAULT_FAIL_ON 一致；
+    # 当前 config.failOn 只解释新报告，不能拿来改写旧报告。
     $reportFailOn = @($report.meta.failOn | Where-Object { $_ })
-    if ($reportFailOn.Count -eq 0) { $reportFailOn = @($failOn) }
+    if ($reportFailOn.Count -eq 0) { $reportFailOn = @('critical', 'important') }
 
     $blocking = @()
     for ($i = 0; $i -lt $issues.Count; $i++) {
