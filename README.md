@@ -1,4 +1,4 @@
-# @local/claude-code-review
+# @hunyed15/claude-code-review
 
 DSH Host 插件：把「本地 Claude Code 做独立只读审核」注册成原生工具 **`claude_review`**。
 
@@ -14,16 +14,44 @@ DSH Host 插件：把「本地 Claude Code 做独立只读审核」注册成原�
 
 ## 安装
 
+### 从 npm / DSH 市场安装（用户）
+
+发布后（包名 `@hunyed15/claude-code-review`）：
+
+- 在 DSH 的 **Plugins → Discover** 搜索 `@hunyed15/claude-code-review`（市场索引收录后）；
+- 或 **Plugins → Add plugin** 选本地目录（内测）；
+- 或直接：
+
 ```powershell
-# 由 DSH 调用（需要权限）
+plugin_manager(action: "install_bundle", target: "@hunyed15/claude-code-review")
+```
+
+需要本机 **Claude Code CLI + 鉴权**，以及 **PowerShell 7（`pwsh`）**；Windows 已验证。首次安装会拉 ACP adapter 依赖；**不需要**单独安装/配置 ACP。
+
+### 本地开发安装
+
+```powershell
 plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claude-code-review")
 ```
 
-> 同名包已安装时 `install_bundle` 会报 `already-installed`：先 `remove_bundle("@local/claude-code-review")`，再按新路径安装。插件目录搬家后不重链，profile 的 `node_modules` 链接会悬空，重启 DSH 后插件不再加载。
+> 同名包已安装时 `install_bundle` 会报 `already-installed`：先 `remove_bundle("@hunyed15/claude-code-review")`，再安装。插件目录搬家后不重链，profile 的 `node_modules` 链接会悬空，重启 DSH 后插件不再加载。
 
 安装后当前 profile 立即生效（bundle 通过 HMR 激活），可用 `cordis_inspect_query(platform:"host", provider:"Tool", method:"listTools")` 确认 `claude_review` 出现。
 
-插件依赖会自动安装，包括 ACP 的 `@agentclientprotocol/sdk` 与 `@agentclientprotocol/claude-agent-acp`；**不需要**再装 ACP server/profile、配 ACP agent 或单独 `npm install`。首次安装会拉 adapter（claude-agent-acp 及其 Claude Agent SDK 依赖，约 108 个包，Windows 已验证）。发布到 registry 时把 `package.json` 改成公开包名并去掉 `private`；依赖会随插件安装进入 profile。
+插件依赖会自动安装，包括 ACP 的 `@agentclientprotocol/sdk` 与 `@agentclientprotocol/claude-agent-acp`；**不需要**再装 ACP server/profile、配 ACP agent 或单独 `npm install`。首次安装会拉 adapter（claude-agent-acp 及其 Claude Agent SDK 依赖，约 108 个包，Windows 已验证）。包名 `@hunyed15/claude-code-review`，`publishConfig.access=public`；依赖会随插件安装进入 profile。
+
+## 发布（维护者）
+
+```powershell
+npm login          # hunyed15
+npm pack --dry-run # 确认 scripts/engine、acp、schema、role、locale、icon 都在
+npm publish --access public
+npm view @hunyed15/claude-code-review version
+```
+
+- `engines.dsh` 限定在已测试的 DSH 版本（当前 `>=0.2.2-rc.3 <0.3.0`）。
+- 发布后在 DSH Plugins 的 Discover（`@deepseek-ai/dsh-plugin-market` 配置索引）或社区 `dshmarket` 中出现；用户也可以直接 `install_bundle` npm 包名。
+- 不提交 `node_modules`；`files` 白名单已包含运行所需脚本与资源。
 
 ## 用法（模型侧）
 
@@ -87,6 +115,7 @@ plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claud
 - ACP 依赖随插件安装；`scripts/acp-review.mjs` 使用 DSH Host 的 Node/Electron 运行，不要求用户 PATH 有 node。Windows 已验证；首次安装会拉 `claude-agent-acp` 及其 Claude Agent SDK 依赖（约 108 个包）。
 - 本机沙箱下审核进程通常只有 `Read` 可用（`Grep`/`Glob` 也可能被拒；`Bash` 不开放），引擎会把 diff 与改动文件清单内联进简报。
 - 审核进程只开放 `Read` / `Grep` / `Glob`；**不开放 Bash**，`Write/Edit/NotebookEdit` 也禁用。只读由工具层强制，不依赖提示词。
+- **权限边界**：插件会启动 `pwsh` 与 Claude Code CLI，读取被审项目代码；审核进程只读，但插件本身是 Host 插件，需要在 DSH 里被信任安装。`pre-commit` hook 是仓库级守卫，`git commit --no-verify` 可绕过；它不是服务端强制。
 - 引擎自带通用 reviewer role（`scripts/reviewer-role.md`）；项目自己的 `.trellis/agents/review.md` 存在时会合并进去。Trellis 模式还会把 `.trellis/spec/**/index.md` 路径列进简报，让审核员按需读取。
 - **截断 fail-closed**：`maxDiffChars` 默认 200000；超出时报告/history/面板都带 `truncated`，**截断的 full pass 不能过 gate**（`allowTruncatedGate: true` 可显式放行）。调大上限或缩窄 `paths` 后重跑。
 - **scope preflight**：`strictScope` 默认 `true`；`description`/`focus` 里提到的、仓库中真实存在的文件，必须至少有一个出现在 diff 里，否则 exit 2。确认是有意为之可设 `strictScope: false` 或加 `-NoStrictScope`。
@@ -111,7 +140,7 @@ plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claud
 - ACP adapter 仍复用现有 Claude Code（`CLAUDE_CODE_EXECUTABLE` 指向引擎解析到的 `claude`），因此 **Claude Code 及其鉴权/模型/relay 仍是插件前置**；这不是 ACP 配置。
 - **成本**：当前 ACP adapter 不提供逐轮 `total_cost_usd`，报告里 `cost_usd=null`、工具 `costKnown=false`，面板不显示假的 `$0`。需要精确成本时用 `transport: cli`。
 - ACP 通过 `session/new` 的 `_meta.claudeCode.options.extraArgs` 透传 `maxBudgetUsd`/`model`/`effort`；未配置时用 Claude settings。需要强制 CLI 用 `transport: cli`。
-- **发布**：把 `package.json` 改成公开包名并去掉 `private` 后发布；依赖会随插件安装自动带上，最终用户仍然只装插件，不需要额外 ACP 安装/配置。
+- **发布**：包名已改为 `@hunyed15/claude-code-review`、已去掉 `private`、`publishConfig.access=public`；维护者发布步骤见「发布（维护者）」。依赖会随插件安装自动带上，最终用户仍然只装插件，不需要额外 ACP 安装/配置。
 
 ## 提交前门禁与 pre-commit
 

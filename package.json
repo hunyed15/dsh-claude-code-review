@@ -1,9 +1,31 @@
 {
-  "name": "@local/claude-code-review",
+  "name": "@hunyed15/claude-code-review",
   "version": "1.2.0",
-  "private": true,
+  "description": "Independent read-only code review with the local Claude Code CLI, exposed as DSH tools plus a collab panel. Includes an internal ACP transport (auto-installed deps, no user ACP setup).",
+  "license": "MIT",
+  "author": "hunyed15",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hunyed15/claude-code-review.git"
+  },
+  "homepage": "https://github.com/hunyed15/claude-code-review#readme",
+  "bugs": {
+    "url": "https://github.com/hunyed15/claude-code-review/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "claude-code",
+    "code-review",
+    "acp"
+  ],
   "type": "module",
-  "description": "Independent read-only code review with the local Claude Code CLI, exposed as DSH tools plus a 协同 panel. Includes an internal ACP transport (auto-installed deps, no user ACP setup).",
+  "engines": {
+    "dsh": ">=0.2.2-rc.3 <0.3.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -24,7 +46,9 @@
     "scripts/git-hooks/pre-commit",
     "scripts/config.json",
     "scripts/review-schema.json",
-    "scripts/reviewer-role.md"
+    "scripts/reviewer-role.md",
+    "README.md",
+    "LICENSE"
   ],
   "dependencies": {
     "@agentclientprotocol/claude-agent-acp": "^0.106.0",

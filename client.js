@@ -7,12 +7,12 @@
  * session state; the view is strictly read-only.
  */
 window.__ModuleLoader__.load({
-  id: '@local/claude-code-review',
+  id: '@hunyed15/claude-code-review',
   factory(require) {
     const React = require('react')
     const h = React.createElement
 
-    const PLUGIN_ID = '@local/claude-code-review'
+    const PLUGIN_ID = '@hunyed15/claude-code-review'
     const CSS_TAG = `${PLUGIN_ID}/panel.css`
 
     const CSS = `

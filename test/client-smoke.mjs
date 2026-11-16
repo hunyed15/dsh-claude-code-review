@@ -49,7 +49,7 @@ function check(name, condition, detail) {
   check('C5 注册到 conversation.view', source.includes("'conversation.view'"), 'missing slot name')
   check('C6 视图 id 为 collab', /id:\s*'collab'/.test(source), 'missing id collab')
   check('C7 提供 label', /label:\s*\(\)\s*=>/.test(source) || /label:\s*'/.test(source), 'missing label')
-  check('C8 模块 id 与包名一致', source.includes("id: '@local/claude-code-review'"), 'module id mismatch')
+  check('C8 模块 id 与包名一致', source.includes("id: '@hunyed15/claude-code-review'"), 'module id mismatch')
 }
 
 // 3. 样式注入：直接插原生 <style>，不依赖 styles builtin

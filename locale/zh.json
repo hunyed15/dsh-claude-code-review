@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "Claude Code 独立审核",
-    "description": "调用本地 Claude Code CLI 对当前工作区做只读独立审核，返回分级问题与提交门禁结论。"
+    "description": "调用本地 Claude Code CLI 做只读独立审核，提供 claude_review / claude_review_disposition 工具和只读「协同」看板；需要 Claude Code CLI 鉴权与 PowerShell 7（pwsh）。"
   }
 }
