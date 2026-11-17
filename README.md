@@ -16,17 +16,25 @@ DSH Host 插件：把「本地 Claude Code 做独立只读审核」注册成原�
 
 ## 安装
 
-### 从 npm / DSH 市场安装（用户）
+本插件**只通过 GitHub 分发**（没有发布到 npm）。包名 `@hunyed15/claude-code-review`，仓库 <https://github.com/hunyed15/dsh-claude-code-review>。
 
-发布后（包名 `@hunyed15/claude-code-review`）：
-
-- 在 DSH 的 **Plugins → Discover** 搜索 `@hunyed15/claude-code-review`（市场索引收录后）；
-- 或 **Plugins → Add plugin** 选本地目录（内测）；
-- 或直接：
+### 从 GitHub 安装（用户）
 
 ```powershell
-plugin_manager(action: "install_bundle", target: "@hunyed15/claude-code-review")
+plugin_manager(action: "install_bundle", target: "git+https://github.com/hunyed15/dsh-claude-code-review.git")
 ```
+
+等价的手动方式：
+
+```powershell
+git clone https://github.com/hunyed15/dsh-claude-code-review.git
+# 然后 Plugins → Add plugin 选该目录，或
+plugin_manager(action: "install_bundle", target: "D:\\path\\to\\dsh-claude-code-review")
+```
+
+需要固定版本时在地址后加 tag 或提交：`git+https://github.com/hunyed15/dsh-claude-code-review.git#v1.2.0`；不写则跟随 `main` 最新提交。
+
+> git 安装时 npm 会克隆仓库并按 `files` 白名单打包，实测产出 17 个文件、86.1 kB，与 `npm pack` 产物完全一致（integrity 相同），所以装到 profile 的是插件本体，不含 `test/` 与开发产物。
 
 需要本机 **Claude Code CLI + 鉴权**，以及 **PowerShell 7（`pwsh`）**；Windows 已验证。首次安装会拉 ACP adapter 依赖；**不需要**单独安装/配置 ACP。
 
@@ -40,20 +48,21 @@ plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claud
 
 安装后当前 profile 立即生效（bundle 通过 HMR 激活），可用 `cordis_inspect_query(platform:"host", provider:"Tool", method:"listTools")` 确认 `claude_review` 出现。
 
-插件依赖会自动安装，包括 ACP 的 `@agentclientprotocol/sdk` 与 `@agentclientprotocol/claude-agent-acp`；**不需要**再装 ACP server/profile、配 ACP agent 或单独 `npm install`。首次安装会拉 adapter（claude-agent-acp 及其 Claude Agent SDK 依赖，约 108 个包，Windows 已验证）。包名 `@hunyed15/claude-code-review`，`publishConfig.access=public`；依赖会随插件安装进入 profile。
+插件依赖会自动安装，包括 ACP 的 `@agentclientprotocol/sdk` 与 `@agentclientprotocol/claude-agent-acp`；**不需要**再装 ACP server/profile、配 ACP agent 或单独 `npm install`。首次安装会拉 adapter（claude-agent-acp 及其 Claude Agent SDK 依赖，约 108 个包，Windows 已验证）。依赖会随插件安装进入 profile。
 
 ## 发布（维护者）
 
+分发只有 GitHub 一个渠道：
+
 ```powershell
-npm login          # hunyed15
-npm pack --dry-run # 确认 scripts/engine、acp、schema、role、locale、icon 都在
-npm publish --access public
-npm view @hunyed15/claude-code-review version
+git push origin main
+git tag v1.2.0 && git push origin v1.2.0   # 可选：给用户一个可固定的版本点
+npm pack --dry-run                          # 发布前确认 17 个文件、86.1 kB，引擎/acp/schema/role/locale/icon 都在
 ```
 
-- `engines.dsh` 限定在已测试的 DSH 版本（当前 `>=0.2.2-rc.3 <0.3.0`）。
-- 发布后在 DSH Plugins 的 Discover（`@deepseek-ai/dsh-plugin-market` 配置索引）或社区 `dshmarket` 中出现；用户也可以直接 `install_bundle` npm 包名。
-- 不提交 `node_modules`；`files` 白名单已包含运行所需脚本与资源。
+- `engines.dsh` 限定在已测试的 DSH 版本（当前 `>=0.2.2-rc.3 <0.3.0`），用户 DSH 版本不满足时 `install_bundle` 会拒绝。
+- 不提交 `node_modules`；`files` 白名单已包含运行所需脚本与资源，git 安装也按它打包。
+- 没有 npm / DSH 商店条目：用户靠上面的 `git+https` 地址安装，所以**改版本号要同时改仓库 tag**，否则用户固定版本时拿不到新代码。
 
 ## 用法（模型侧）
 
@@ -142,7 +151,7 @@ npm view @hunyed15/claude-code-review version
 - ACP adapter 仍复用现有 Claude Code（`CLAUDE_CODE_EXECUTABLE` 指向引擎解析到的 `claude`），因此 **Claude Code 及其鉴权/模型/relay 仍是插件前置**；这不是 ACP 配置。
 - **成本**：当前 ACP adapter 不提供逐轮 `total_cost_usd`，报告里 `cost_usd=null`、工具 `costKnown=false`，面板不显示假的 `$0`。需要精确成本时用 `transport: cli`。
 - ACP 通过 `session/new` 的 `_meta.claudeCode.options.extraArgs` 透传 `maxBudgetUsd`/`model`/`effort`；未配置时用 Claude settings。需要强制 CLI 用 `transport: cli`。
-- **发布**：包名已改为 `@hunyed15/claude-code-review`、已去掉 `private`、`publishConfig.access=public`；维护者发布步骤见「发布（维护者）」。依赖会随插件安装自动带上，最终用户仍然只装插件，不需要额外 ACP 安装/配置。
+- **发布**：只走 GitHub；包名 `@hunyed15/claude-code-review`、已去掉 `private`，安装地址见「发布（维护者）」。依赖会随插件安装自动带上，最终用户仍然只装插件，不需要额外 ACP 安装/配置。
 
 ## 提交前门禁与 pre-commit
 
