@@ -6,11 +6,11 @@
   "author": "hunyed15",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hunyed15/claude-code-review.git"
+    "url": "git+https://github.com/hunyed15/dsh-claude-code-review.git"
   },
-  "homepage": "https://github.com/hunyed15/claude-code-review#readme",
+  "homepage": "https://github.com/hunyed15/dsh-claude-code-review#readme",
   "bugs": {
-    "url": "https://github.com/hunyed15/claude-code-review/issues"
+    "url": "https://github.com/hunyed15/dsh-claude-code-review/issues"
   },
   "keywords": [
     "dsh",

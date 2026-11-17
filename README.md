@@ -1,5 +1,7 @@
 # @hunyed15/claude-code-review
 
+> 源码：<https://github.com/hunyed15/dsh-claude-code-review>
+
 DSH Host 插件：把「本地 Claude Code 做独立只读审核」注册成原生工具 **`claude_review`**。
 
 > 本仓库是**独立插件仓库**，可以安装到任意 DSH profile；`<cwd>/tools/claude-review/**` 属于被审项目的可选引擎，不是本仓库的一部分。XinHuo 等只是被它审核过的项目。
