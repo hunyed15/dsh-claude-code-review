@@ -44,7 +44,7 @@ plugin_manager(action: "install_bundle", target: "D:\\path\\to\\dsh-claude-code-
 plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claude-code-review")
 ```
 
-> 同名包已安装时 `install_bundle` 会报 `already-installed`：先 `remove_bundle("@hunyed15/claude-code-review")`，再安装。插件目录搬家后不重链，profile 的 `node_modules` 链接会悬空，重启 DSH 后插件不再加载。
+> 同名包已安装时 `install_bundle` 会报 `already-installed`：先 `remove_bundle(...)` 再安装。注意**链接安装的 bundle 名是 `@local/<目录名>`**（本机实测为 `@local/claude-code-review`，插件行 `moduleName` 才是 `@hunyed15/claude-code-review`）；从链接安装切到 git 安装前要先 `remove_bundle("@local/claude-code-review")`，否则两个 bundle 会抢同一个插件行 id。插件目录搬家后不重链，profile 的 `node_modules` 链接会悬空，重启 DSH 后插件不再加载。
 
 安装后当前 profile 立即生效（bundle 通过 HMR 激活），可用 `cordis_inspect_query(platform:"host", provider:"Tool", method:"listTools")` 确认 `claude_review` 出现。
 
