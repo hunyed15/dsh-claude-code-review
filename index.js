@@ -816,6 +816,72 @@ export function apply(ctx, config = {}) {
     },
   }
 
+  // 让 Agent 也能读到与侧栏「项目」页**同一份**投影：不另存状态，只读同一账本。
+  // 只有一个读取工具——工具越多，模型选错的概率越大。
+  const projectStatusTool = {
+    name: 'project_status',
+    description:
+      'Read-only project status for the current workspace: undisposed blocking findings, the seven phase gates, ' +
+      'and the single next step. This is the same projection the sidebar 项目 page shows — use it before deciding ' +
+      'what to do next, instead of re-deriving status from .trellis by hand.',
+    parameters: {
+      type: 'object',
+      properties: {
+        cwd: { type: 'string', description: 'Project root. Defaults to the session working directory.' },
+        detail: {
+          type: 'boolean',
+          description: 'Include every gate basis and all ledger warnings. Default false.',
+        },
+      },
+      additionalProperties: false,
+    },
+    async execute(args, exec) {
+      const options = args ?? {}
+      const cwd = agentCwd(ctx, exec, options.cwd)
+      const evidence = await readCockpitEvidence(cwd)
+      const model = buildCockpitModel(evidence)
+      const blocking = model.totals?.blocking ?? 0
+      const warnings = Array.isArray(model.warnings) ? model.warnings : []
+      const degraded = warnings.length > 0
+      const issues = Array.isArray(model.totals?.issues) ? model.totals.issues : []
+      const current = model.gates.find((gate) => gate.state === 'current') || null
+      const doneCount = model.gates.filter((gate) => gate.state === 'done').length
+
+      const lines = []
+      lines.push(
+        `${model.project.name} · 阶段门 ${doneCount}/7${current ? ` · 当前「${current.name}」` : ' · 全部完成'}`,
+      )
+      lines.push(blocking > 0 ? `未处置阻塞 ${blocking} 条：` : '未处置阻塞 0 条')
+      for (const issue of issues) {
+        const where = issue.file ? ` (${issue.file}${issue.line ? `:${issue.line}` : ''})` : ''
+        lines.push(`- [${issue.severity}] ${issue.title}${where}`)
+      }
+      lines.push(`下一步：${model.nextAction.label}`)
+      lines.push(`  ${model.nextAction.instruction}`)
+      lines.push(`  理由：${model.nextAction.reason}`)
+      if (degraded) {
+        lines.push(`注意：账本有 ${warnings.length} 处异常，以上数字可能偏低——先修数据再据此行动。`)
+        if (options.detail === true) for (const line of warnings) lines.push(`  · ${line}`)
+      }
+      if (options.detail === true) {
+        lines.push('阶段门依据：')
+        for (const gate of model.gates) lines.push(`  ${gate.name} [${gate.state}] ${gate.basis}`)
+      }
+
+      return {
+        ok: true,
+        text: lines.join('\n'),
+        project: model.project.name,
+        blocking,
+        degraded,
+        nextAction: model.nextAction.kind,
+        gates: model.gates.map((gate) => `${gate.name}=${gate.state}`),
+        issues,
+        warnings,
+      }
+    },
+  }
+
   // A+：一键安装提交门禁 hook（显式调用，不在插件加载时自动写 .git/hooks）
   const installHookTool = {
     name: 'claude_review_install_hook',
@@ -899,6 +965,7 @@ export function apply(ctx, config = {}) {
 
   ctx.effect(() => ctx.tools.register(definition))
   ctx.effect(() => ctx.tools.register(dispositionTool))
+  ctx.effect(() => ctx.tools.register(projectStatusTool))
   ctx.effect(() => ctx.tools.register(installHookTool))
 
   // 工具先注册完，再尝试可选的协同面板：

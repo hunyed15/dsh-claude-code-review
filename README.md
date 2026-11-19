@@ -10,9 +10,10 @@ DSH Host 插件：把「本地 Claude Code 做独立只读审核」注册成原�
 
 ## 它是什么 / 不是什么
 
-- **是**：一个 Cordis Host 插件（bundle）。安装后当前 profile 的所有会话都会多两个工具（`claude_review` / `claude_review_disposition`），同时多两个**只读**界面：
+- **是**：一个 Cordis Host 插件（bundle）。安装后当前 profile 的所有会话都会多三个工具（`claude_review` / `claude_review_disposition` / `project_status`，另有 `claude_review_install_hook`），同时多三个**只读**界面：
   - 会话内的「协同」tab（`conversation.view`，id=`collab`）：审核轮次与缺陷生命周期看板；
-  - 左侧栏的「项目」整页（`main` key + `sidebar.panellist`，id=`project-cockpit`）：到哪了 / 卡在哪 / 下一步做什么。
+  - 左侧栏的「项目」整页（`main` key + `sidebar.panellist`，id=`project-cockpit`）：到哪了 / 卡在哪 / 下一步做什么；
+  - 全局提醒（`shell.overlay`）：还有未处置阻塞时浮一条「去看」，同一项目每小时最多一次。
 - **不是**：不替换任何现有 UI，也不写项目文件——两个面板都只读。
 - 审核引擎仍是 `Invoke-ClaudeReview.ps1`（快照增量、diff 范围、提示词、报告、门禁、退出码全在里面）。插件只做路径解析、进程调度与结果归一化，**避免两套逻辑漂移**。
 - **2.0.0 起，原先独立的 `@hunyed15/project-cockpit` 已并入本包**：只装这一个插件即可，不要再去单独安装驾驶舱（两者同时存在会抢同一个面板 id `project-cockpit`）。
@@ -30,6 +31,8 @@ DSH Host 插件：把「本地 Claude Code 做独立只读审核」注册成原�
 **行动层是两步，且是故意的**：点「去对话发送」→ 跳回对话，输入框上方出现通栏（带项目名）→「填入输入框 / 发送 / 忽略」。DSH 当前没有向活跃会话注入用户消息的公开 API（`commands.execute` 只跑斜杠命令），所以走浏览器侧已验证的 `inputActions.setDraft()/submit()`——多一次点击，换来"你看得见将要发出去的是什么"。
 
 **数据不可信时整屏一起降级**：账本异常或读取失败 → chip 变「状态待确认」→ 下一步变「先确认数据」且主按钮禁用 → 阶段门变「待确认」→ 表格 `待修` 显示 `—` 而不是绿色 0。
+
+**两个顺手能用的小东西**：`复制摘要` 把当前状态生成 Markdown（卡点数、阶段门进度、下一步、待修清单），贴进站会/周报；有未处置阻塞时，全局提醒会浮一条「还有 N 条未处置阻塞 · 去看」，同一项目每小时最多一次（存在 localStorage，隐私模式下可能重复）。
 
 **数据来源**：`.trellis/tasks/*/task.json`、每个任务自己的 `review/history.jsonl`、`review-N.json`、`dispositions.jsonl`；无 `.trellis` 时回落 `.dsh/claude-review/ledger/review/`。bug 计数口径与「协同」面板一致（`failOn` 取报告 `meta.failOn`，缺失回退 `critical/important`；处置必须轮次匹配）。
 
@@ -103,6 +106,17 @@ npm pack --dry-run                          # 发布前确认 17 个文件、86.
 
 返回：`ok / mode / storage / base / head / profile / transport / verdict / critical / important / minor / summary / reportPath / markdownPath / costUsd / costKnown / truncated / scopeWarning / cached / exitCode / escalated / note / enginePath / engineSource / engineWarning`。
 `verdict` 为 `fix` 或 `gate-blocked` 时 `ok=false`，`note` 会写明「必须先修，再重跑同一模式」；`cached=true` 表示命中了完全相同输入的缓存，没有调用模型。`transport` 是实际使用的 `acp` 或 `cli`；ACP 目前不返回逐轮成本，`costKnown=false`、`costUsd=0`（面板显示 `—`，不伪造）。
+
+### `project_status`（Agent 读项目状态）
+
+让 Agent 读到**和侧栏「项目」页同一份投影**，而不是自己去翻 `.trellis` 后得出另一套口径：
+
+| 参数 | 说明 |
+| --- | --- |
+| `cwd` | 项目根，默认会话工作目录 |
+| `detail` | `true` 时附带每道阶段门的依据与全部账本异常 |
+
+返回 `{ ok, text, project, blocking, degraded, nextAction, gates, issues, warnings }`，`text` 是给人/模型读的分行摘要（阶段门进度、未处置阻塞那几条、下一步指令与理由）。只读、不写任何文件——**不另存状态**，避免两套 source of truth 互相追赶。
 
 ## 引擎解析顺序与版本握手
 
@@ -293,11 +307,14 @@ pwsh -NoProfile -File test/engine-gate.ps1   # 55 个断言：gate 快照/历史
 pwsh -NoProfile -File test/engine-cache.ps1  # 8 个断言：fake Claude 验证缓存、空 diff 清 hash、gate 可解锁
 pwsh -NoProfile -File test/engine-round-guard.ps1 # 22 个断言：V2 未处置 blocking 拒绝新 review、fixed/deferred/反证放行、跨轮/原始下标/gate/range、报告 failOn、nothing 保留 lastReport、旧报告回退默认 failOn
 pwsh -NoProfile -File test/engine-acp.ps1    # 10 个断言：fake ACP full/gate、空格路径、auto→CLI、超时/启动超时回退
-node test/tool-smoke.mjs                     # 59 个断言，约 10 秒
+node test/tool-smoke.mjs                     # 66 个断言，约 10 秒
 node test/panel-smoke.mjs                    # 105 个断言（真实仓库断言可选，见下）
 node test/client-smoke.mjs                   # 18 个断言
 node test/acp-smoke.mjs                      # 13 个断言：role/budget extraArgs、只读权限、fs、真实 adapter 启动失败
+node --test test/cockpit-*.test.js           # 118 个断言：驾驶舱计数口径、读取器、阶段门、下一步、模型、路由、客户端
 ```
+
+也可以直接 `npm test`（按上面顺序串行跑；**不要用 `node --test` 跑全部**——它会并发跑那些要 spawn 子进程的 smoke 套件并卡住）。
 
 - `engine-gate`：在临时 git 仓库里直接跑引擎 gate，覆盖本地无历史/干净 → blocked（不能把没跑过当 pass）、full pass、快照不一致、incremental/fix/history 损坏/无历史有改动、Trellis pass、显式 trellis 缺 `.trellis`、range 提交区间与 dirty/head mismatch 标记、`full -Base`、截断 full pass 不过 gate、自定义 Base 的 full 不冒充收尾门禁、scope 不一致（含 dotfile / Windows 绝对路径 / 跨盘符 / 带空格 / 无扩展名 / 汉字紧贴路径 / 中文文件名正反向）、`-Head` 仅 range、gate 忽略 Base、忽略或已跟踪的本地账本都不导致快照漂移、跟踪的 review 文件不把 range 误判为 dirty、`SessionId → task.py current` 与「无活动任务不猜」。
 - `engine-cache`：用编译的 fake Claude 统计真实调用次数；相同 diff/输入第二次直接 cached（0 次新调用）但会按当前快照落一条零成本 history；中间插入空 diff 轮次会清掉旧 hash，随后相同 full 重新审核，gate 能正常通过。

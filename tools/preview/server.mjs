@@ -65,6 +65,11 @@ const harness = `(function () {
       if (which === 'main' || which === 'both') {
         ReactDOM.createRoot(document.getElementById('root')).render(React.createElement(find('main').Comp, {}))
       }
+      if (which === 'toast') {
+        // 全局提醒挂在 shell.overlay；单独渲染它便于截图
+        ReactDOM.createRoot(document.getElementById('root')).render(
+          React.createElement(find('shell.overlay').Comp, {}))
+      }
       if (which === 'dock' || which === 'both') {
         ReactDOM.createRoot(document.getElementById('dock')).render(
           React.createElement(find('conversation.input.dock').Comp, { inputActions: window.__harness.fakeInput }))

@@ -193,9 +193,10 @@ test('展开按钮有 aria-controls，被展开内容是列表语义', async () 
 
 test('复制失败必须说出来，不能静默', async () => {
   const source = await read('client.js')
-  assert.ok(source.includes("setCopyState('fail')"))
+  assert.ok(source.includes('const copyText = ('), '复制走统一封装')
+  assert.ok(source.includes("setState('fail')"))
   assert.ok(source.includes('复制失败'))
-  assert.ok(source.includes('copyTimer'), '定时器需要清理引用')
+  assert.ok(source.includes('copyTimer') && source.includes('summaryTimer'), '两个定时器都要有引用')
 })
 
 test('正文行长收窄，表格保持全宽', async () => {
@@ -320,7 +321,7 @@ test('错误文案不再指向页面上不存在的项目切换器', async () =>
 
 test('复制失败态会自行复位，不会永久停在失败', async () => {
   const source = await read('client.js')
-  assert.ok(/const fail = \(\) => \{[\s\S]{0,200}?setCopyState\('idle'\)/.test(source), '失败态也要有定时复位')
+  assert.ok(/const fail = \(\) => \{[\s\S]{0,200}?setState\('idle'\)/.test(source), '失败态也要有定时复位')
 })
 
 test('数据不可信时阶段门也给"待确认"，不与卡点数说法打架', async () => {
@@ -329,6 +330,24 @@ test('数据不可信时阶段门也给"待确认"，不与卡点数说法打架
   assert.ok(source.includes("props.degraded && gate.state === 'current' ? '待确认'"), '当前门的状态文字要降级')
   assert.ok(source.includes('pc-seg-unknown'), '进度条当前段要换成待确认样式')
   assert.ok(source.includes('h(GateList, { gates, hidden: !gatesOpen, degraded })'), 'GateList 要拿到 degraded')
+})
+
+test('未处置阻塞会在 shell.overlay 提醒，且每小时最多一次', async () => {
+  const source = await read('client.js')
+  assert.ok(source.includes("'shell.overlay'"), '要注册到全局浮层')
+  assert.ok(source.includes('Toast: BlockingToast'), 'IIFE 要把它导出去')
+  assert.ok(source.includes('project-cockpit:toast:'), '需要按项目节流')
+  assert.ok(source.includes('3600_000'), '节流窗口是一小时')
+  assert.ok(source.includes("layout.selectPanel(PANEL_ID)"), '"去看"要能跳到面板')
+})
+
+test('可以复制 Markdown 摘要（站会/周报用）', async () => {
+  const source = await read('client.js')
+  assert.ok(source.includes('function summaryMarkdown'), '摘要由当前模型生成')
+  assert.ok(source.includes("'复制摘要'"), '要有按钮')
+  assert.ok(source.includes('copySummary'), '要接到点击')
+  assert.ok(source.includes('未处置阻塞：'), '摘要要含卡点数')
+  assert.ok(source.includes('阶段门：'), '摘要要含阶段门进度')
 })
 
 test('nextAction 缺字段时逐项兜底，不落到 ErrorBoundary', async () => {

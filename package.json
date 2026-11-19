@@ -1,6 +1,6 @@
 {
   "name": "@hunyed15/claude-code-review",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Independent read-only code review with the local Claude Code CLI, plus a project cockpit panel (where you are, what blocks you, the next step). Exposed as DSH tools with an in-app collab tab and a sidebar project page. Includes an internal ACP transport (auto-installed deps, no user ACP setup).",
   "license": "MIT",
   "author": "hunyed15",

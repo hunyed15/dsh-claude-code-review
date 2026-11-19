@@ -1395,6 +1395,13 @@ h2.pc-card-title { margin:0 0 10px; font-size:12px; font-weight:600; color:var(-
 .pc-dock-label { font-weight:600; color:var(--dsw-alias-brand-primary); }
 .pc-dock-actions { display:flex; gap:8px; flex-wrap:wrap; }
 .pc-dock-hint { flex:0 0 100%; font-size:11px; margin-top:4px; }
+/* 全局提醒：shell.overlay 里的条目默认不接管点击，这里自己开 */
+.pc-toast { position:fixed; right:16px; bottom:16px; z-index:60; pointer-events:auto;
+  display:flex; align-items:center; gap:8px; max-width:min(420px, calc(100vw - 32px));
+  padding:10px 14px; border-radius:10px; font-size:12px;
+  background:var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-1));
+  border:1px solid var(--dsw-alias-state-warn-primary); color:var(--dsw-alias-label-primary);
+  box-shadow:0 6px 24px rgba(0,0,0,.18); }
 @media (max-width:640px) {
   .pc-head-inner, .pc-body { padding-left:14px; padding-right:14px; }
 }
@@ -1403,6 +1410,18 @@ h2.pc-card-title { margin:0 0 10px; font-size:12px; font-weight:600; color:var(-
   .pc-col-secondary { display:none; }
 }
 `
+
+    // CSS 必须全局注入一次：面板、通栏、提醒是三个独立挂载点，
+    // 只在 Page 里渲染 <style> 会让"没打开过面板"的用户看到无样式的裸文本。
+    const STYLE_ID = 'claude-code-review-pc-style'
+    function ensureStyles() {
+      if (typeof document === 'undefined' || !document || !document.head) return
+      if (document.getElementById(STYLE_ID)) return
+      const el = document.createElement('style')
+      el.id = STYLE_ID
+      el.textContent = CSS
+      document.head.appendChild(el)
+    }
 
     function Icon(props) {
       const size = props && props.size ? props.size : 16
@@ -1536,6 +1555,85 @@ h2.pc-card-title { margin:0 0 10px; font-size:12px; font-weight:600; color:var(-
       return { workspaces, selected, setSelected, model, error, loading, goodAt, empty, refresh }
     }
 
+    // 复制摘要：给站会/周报用。只从当前模型生成，不额外读盘。
+    function summaryMarkdown(model) {
+      const lines = [`## ${model.project.name}`, '']
+      const blocking = (model.totals && model.totals.blocking) || 0
+      const done = model.gates.filter((gate) => gate.state === 'done').length
+      const current = model.gates.find((gate) => gate.state === 'current') || null
+      const issues = (model.totals && model.totals.issues) || []
+      lines.push(`- 未处置阻塞：${blocking}`)
+      lines.push(`- 阶段门：${done}/7${current ? `，当前「${current.name}」` : '，全部完成'}`)
+      lines.push(`- 下一步：${model.nextAction.label}`)
+      lines.push(`- 指令：\`${model.nextAction.instruction}\``)
+      if (issues.length > 0) {
+        lines.push('- 待修：')
+        for (const issue of issues) {
+          const where = issue.file ? `（${issue.file}${issue.line ? `:${issue.line}` : ''}）` : ''
+          lines.push(`  - [${SEVERITY_TEXT[issue.severity] || issue.severity}] ${issue.title}${where}`)
+        }
+      }
+      if (model.warnings && model.warnings.length > 0) lines.push(`- 数据异常：${model.warnings.length} 处（数字可能偏低）`)
+      lines.push('', `_更新于 ${formatTime(model.generatedAt)}_`)
+      return lines.join('\n')
+    }
+
+    /**
+     * 全局提醒：新会话/刷新后，若上一轮还有未处置阻塞，在 shell.overlay 浮一条。
+     * 同一项目每小时最多提醒一次，避免变成噪音。
+     */
+    function BlockingToast() {
+      const [state, setState] = React.useState(null)
+      React.useEffect(() => {
+        ensureStyles()
+      }, [])
+      React.useEffect(() => {
+        let alive = true
+        getJson(`${API}/panel`)
+          .then((model) => {
+            if (!alive) return
+            const blocking = (model?.totals?.blocking) || 0
+            if (blocking <= 0) return
+            const key = `project-cockpit:toast:${(model.project && model.project.path) || ''}`
+            let last = 0
+            try {
+              last = Number(window.localStorage.getItem(key) || 0)
+            } catch {
+              last = 0
+            }
+            if (Date.now() - last < 3600_000) return
+            try {
+              window.localStorage.setItem(key, String(Date.now()))
+            } catch {
+              // 隐私模式：不记忆，最多重复提醒
+            }
+            setState({ blocking, name: (model.project && model.project.name) || '' })
+          })
+          .catch(() => {})
+        return () => {
+          alive = false
+        }
+      }, [])
+      if (!state) return null
+      return h(
+        'div',
+        { className: 'pc-toast', role: 'status' },
+        h('span', null, `${state.name ? `${state.name}：` : ''}还有 ${state.blocking} 条未处置阻塞`),
+        h(
+          'button',
+          {
+            className: 'pc-btn pc-btn-primary',
+            onClick: () => {
+              setState(null)
+              if (layout && typeof layout.selectPanel === 'function') layout.selectPanel(PANEL_ID)
+            },
+          },
+          '去看',
+        ),
+        h('button', { className: 'pc-btn', onClick: () => setState(null), 'aria-label': '关闭提醒' }, '×'),
+      )
+    }
+
     function GateList(props) {
       const gates = props.gates
       return h(
@@ -1611,6 +1709,9 @@ h2.pc-card-title { margin:0 0 10px; font-size:12px; font-weight:600; color:var(-
     function NextActionDock(props) {
       const value = usePending()
       const boxRef = React.useRef(null)
+      React.useEffect(() => {
+        ensureStyles()
+      }, [])
       // 从面板跳过来时焦点会落在 body；这里主动接管，读屏才知道多了这条通栏。
       React.useEffect(() => {
         if (value && boxRef.current && typeof boxRef.current.focus === 'function') {
@@ -1666,10 +1767,18 @@ h2.pc-card-title { margin:0 0 10px; font-size:12px; font-weight:600; color:var(-
         useCockpit()
       const [gatesOpen, setGatesOpen] = React.useState(false)
       const [copyState, setCopyState] = React.useState('idle')
+      const [summaryState, setSummaryState] = React.useState('idle')
       const copyTimer = React.useRef(null)
+      const summaryTimer = React.useRef(null)
       const sent = useSent()
 
-      React.useEffect(() => () => clearTimeout(copyTimer.current), [])
+      React.useEffect(
+        () => () => {
+          clearTimeout(copyTimer.current)
+          clearTimeout(summaryTimer.current)
+        },
+        [],
+      )
 
       // 换项目就丢掉上一条待发送指令：否则可能把 A 项目的指令发到 B 项目。
       React.useEffect(() => {
@@ -1677,27 +1786,31 @@ h2.pc-card-title { margin:0 0 10px; font-size:12px; font-weight:600; color:var(-
         saveLastProject(selected)
       }, [selected])
 
-      const copyInstruction = () => {
-        if (!model) return
+      const copyText = (text, setState, timer) => {
         const write = navigator.clipboard && navigator.clipboard.writeText
         // 失败态也要能回去，否则按钮会永久停在"复制失败"
         const fail = () => {
-          setCopyState('fail')
-          clearTimeout(copyTimer.current)
-          copyTimer.current = setTimeout(() => setCopyState('idle'), 4000)
+          setState('fail')
+          clearTimeout(timer.current)
+          timer.current = setTimeout(() => setState('idle'), 4000)
         }
         if (!write) {
           fail()
           return
         }
-        write.call(navigator.clipboard, action.instruction).then(
-          () => {
-            setCopyState('done')
-            clearTimeout(copyTimer.current)
-            copyTimer.current = setTimeout(() => setCopyState('idle'), 1600)
-          },
-          fail,
-        )
+        write.call(navigator.clipboard, text).then(() => {
+          setState('done')
+          clearTimeout(timer.current)
+          timer.current = setTimeout(() => setState('idle'), 1600)
+        }, fail)
+      }
+
+      const copyInstruction = () => {
+        if (model) copyText(action.instruction, setCopyState, copyTimer)
+      }
+
+      const copySummary = () => {
+        if (model) copyText(summaryMarkdown(model), setSummaryState, summaryTimer)
       }
 
       const sendToAgent = () => {
@@ -1710,7 +1823,11 @@ h2.pc-card-title { margin:0 0 10px; font-size:12px; font-weight:600; color:var(-
         if (layout && typeof layout.selectPanel === 'function') layout.selectPanel('conversation')
       }
 
-      const style = h('style', { key: 'pc-css' }, CSS)
+      // 面板、通栏、提醒三个挂载点各自保证样式在，幂等
+      React.useEffect(() => {
+        ensureStyles()
+      }, [])
+      const style = null
       const totals = model && model.totals ? model.totals : null
       const blocking = totals ? totals.blocking : 0
       // 服务端少字段时不要落到 ErrorBoundary 白板：逐项兜底，页面还能显示"数据不完整"。
@@ -1919,6 +2036,15 @@ h2.pc-card-title { margin:0 0 10px; font-size:12px; font-weight:600; color:var(-
                 { className: 'pc-btn', onClick: copyInstruction },
                 copyState === 'done' ? '已复制' : copyState === 'fail' ? '复制失败，请手动选择' : '复制指令',
               ),
+              h(
+                'button',
+                { className: 'pc-btn', onClick: copySummary },
+                summaryState === 'done'
+                  ? '已复制摘要'
+                  : summaryState === 'fail'
+                    ? '复制失败，请手动选择'
+                    : '复制摘要',
+              ),
             ),
           ),
           h(
@@ -2054,7 +2180,16 @@ h2.pc-card-title { margin:0 0 10px; font-size:12px; font-weight:600; color:var(-
       return h(Boundary, null, h(Page))
     }
 
-      return { PanelRoot, Icon, Dock: NextActionDock, PanelId: PANEL_ID, setLayout: (value) => { layout = value } }
+      return {
+        PanelRoot,
+        Icon,
+        Dock: NextActionDock,
+        Toast: BlockingToast,
+        PanelId: PANEL_ID,
+        setLayout: (value) => {
+          layout = value
+        },
+      }
     })()
 
     return {
@@ -2090,6 +2225,13 @@ h2.pc-card-title { margin:0 0 10px; font-size:12px; font-weight:600; color:var(-
             ctx.slots.register(
               { name: 'conversation.input.dock', id: 'project-cockpit-next', order: 30, label: () => '项目下一步' },
               PC.Dock,
+            ),
+          )
+          // 未处置阻塞的全局提醒（同一项目每小时最多一次），复用 shell.overlay。
+          ctx.slots.inject('shell.overlay', () =>
+            ctx.slots.register(
+              { name: 'shell.overlay', id: 'project-cockpit-blocking-toast' },
+              PC.Toast,
             ),
           )
         } catch (error) {

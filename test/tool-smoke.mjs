@@ -406,6 +406,30 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
   await rm(root, { recursive: true, force: true })
 }
 
+// P. project_status：Agent 读到的必须是和侧栏「项目」页同一份投影
+{
+  const project = await makeTrellisProject('crc-status-project-')
+  try {
+    const services = { workingDirectory: { get: () => project, defaultDirectory: project } }
+    const tools = makeCtx(cannedSpawn('{}', 0), {}, services)
+    const tool = tools.get('project_status')
+    check('P1 注册了 project_status 工具', Boolean(tool))
+    const out = await tool.execute({}, exec('session-status'))
+    check(
+      'P2 返回 ok/blocking/text',
+      out?.ok === true && out.blocking === 0 && typeof out.text === 'string',
+      JSON.stringify(out).slice(0, 160),
+    )
+    check('P3 文本含下一步与理由', out.text.includes('下一步：') && out.text.includes('理由：'))
+    check('P4 七道阶段门齐全', Array.isArray(out.gates) && out.gates.length === 7, String(out.gates?.length))
+    const detail = await tool.execute({ detail: true }, exec('session-status'))
+    check('P5 detail 展开每道门依据', detail.text.includes('阶段门依据：'))
+    check('P6 不写任何文件', out.ok === true)
+  } finally {
+    await rm(project, { recursive: true, force: true })
+  }
+}
+
 // J. 面板路由：路径授权 / 正常返回 / 未知路径（临时 Trellis fixture）
 {
   const project = await makeTrellisProject('crc-panel-project-')
