@@ -10,9 +10,30 @@ DSH Host 插件：把「本地 Claude Code 做独立只读审核」注册成原�
 
 ## 它是什么 / 不是什么
 
-- **是**：一个 Cordis Host 插件（bundle），安装后当前 profile 的所有会话都会多两个工具（`claude_review` / `claude_review_disposition`），并可选增加一个会话内只读的「协同」tab。
-- **不是**：独立页面，也不替换任何现有 UI；客户端只有 `client.js` 里的一个 `conversation.view` 视图。
+- **是**：一个 Cordis Host 插件（bundle）。安装后当前 profile 的所有会话都会多两个工具（`claude_review` / `claude_review_disposition`），同时多两个**只读**界面：
+  - 会话内的「协同」tab（`conversation.view`，id=`collab`）：审核轮次与缺陷生命周期看板；
+  - 左侧栏的「项目」整页（`main` key + `sidebar.panellist`，id=`project-cockpit`）：到哪了 / 卡在哪 / 下一步做什么。
+- **不是**：不替换任何现有 UI，也不写项目文件——两个面板都只读。
 - 审核引擎仍是 `Invoke-ClaudeReview.ps1`（快照增量、diff 范围、提示词、报告、门禁、退出码全在里面）。插件只做路径解析、进程调度与结果归一化，**避免两套逻辑漂移**。
+- **2.0.0 起，原先独立的 `@hunyed15/project-cockpit` 已并入本包**：只装这一个插件即可，不要再去单独安装驾驶舱（两者同时存在会抢同一个面板 id `project-cockpit`）。
+
+## 项目驾驶舱（左侧栏「项目」）
+
+一个整页，只读回答三个问题：
+
+| 问题 | 界面上的答案 |
+|---|---|
+| 到哪了 | 顶栏卡点数 + 七道阶段门（一句话 + 进度线） |
+| 卡在哪 | 「下一步」卡里列出最多 3 条未处置问题：严重度 + 标题 + `文件:行` |
+| 下一步 | 状态机给出的唯一动作 + 可直接执行的指令原文 + 理由 |
+
+**行动层是两步，且是故意的**：点「去对话发送」→ 跳回对话，输入框上方出现通栏（带项目名）→「填入输入框 / 发送 / 忽略」。DSH 当前没有向活跃会话注入用户消息的公开 API（`commands.execute` 只跑斜杠命令），所以走浏览器侧已验证的 `inputActions.setDraft()/submit()`——多一次点击，换来"你看得见将要发出去的是什么"。
+
+**数据不可信时整屏一起降级**：账本异常或读取失败 → chip 变「状态待确认」→ 下一步变「先确认数据」且主按钮禁用 → 阶段门变「待确认」→ 表格 `待修` 显示 `—` 而不是绿色 0。
+
+**数据来源**：`.trellis/tasks/*/task.json`、每个任务自己的 `review/history.jsonl`、`review-N.json`、`dispositions.jsonl`；无 `.trellis` 时回落 `.dsh/claude-review/ledger/review/`。bug 计数口径与「协同」面板一致（`failOn` 取报告 `meta.failOn`，缺失回退 `critical/important`；处置必须轮次匹配）。
+
+**权限边界**：面板是 root scope，拿不到会话；项目来自 `workspaceRegistry` 里登记过的路径，其余 403。路由只读（`GET`），只监听 `127.0.0.1`。
 
 ## 安装
 
@@ -32,7 +53,7 @@ git clone https://github.com/hunyed15/dsh-claude-code-review.git
 plugin_manager(action: "install_bundle", target: "D:\\path\\to\\dsh-claude-code-review")
 ```
 
-需要固定版本时在地址后加 tag 或提交：`git+https://github.com/hunyed15/dsh-claude-code-review.git#v1.2.0`；不写则跟随 `main` 最新提交。
+需要固定版本时在地址后加 tag 或提交：`git+https://github.com/hunyed15/dsh-claude-code-review.git#v2.0.0`；不写则跟随 `main` 最新提交。
 
 > git 安装时 npm 会克隆仓库并按 `files` 白名单打包，实测产出 17 个文件、86.1 kB，与 `npm pack` 产物完全一致（integrity 相同），所以装到 profile 的是插件本体，不含 `test/` 与开发产物。
 
@@ -56,7 +77,7 @@ plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claud
 
 ```powershell
 git push origin main
-git tag v1.2.0 && git push origin v1.2.0   # 可选：给用户一个可固定的版本点
+git tag v2.0.0 && git push origin v2.0.0   # 可选：给用户一个可固定的版本点
 npm pack --dry-run                          # 发布前确认 17 个文件、86.1 kB，引擎/acp/schema/role/locale/icon 都在
 ```
 
@@ -305,3 +326,16 @@ bundle 是**链接安装**（profile 的 `node_modules` 指向本目录），文
 | 本地账本 `.dsh/claude-review/ledger/` | 没有 `.trellis` 时的完整替代存储（history/state/report/gate/disposition） |
 
 三者共用同一套引擎契约；报告目录随 `storage` 落在 `.trellis/tasks/<task>/review/` 或 `.dsh/claude-review/ledger/review/`。
+
+## 开发：看不到界面时怎么办
+
+DSH 的 GUI 需要鉴权 token，agent 打不开它。`tools/preview/` 提供本地预览 + 截图：用真实 React + 真实 CSS 渲染 `client.js`（协同 tab 与项目驾驶舱都能渲染），数据由 `lib/cockpit/` 现算，支持 blocking / warnings / error / empty 等场景，并能在精确 CSS 宽度下量出横向溢出。
+
+```powershell
+npm --prefix tools/preview install
+node tools/preview/server.mjs                       # http://127.0.0.1:4711/
+node tools/preview/shot.mjs "http://127.0.0.1:4711/?scenario=blocking" 360 900 narrow.png full
+node tools/preview/shot.mjs "http://127.0.0.1:4711/?scenario=manytasks" 340 --measure
+```
+
+两个坑写在 `tools/preview/README.md`：不要用 `chrome --screenshot`（DPI 缩放会让布局正确也看着被裁），预览服务必须发 `no-store`（否则截图看的是缓存的旧 client.js）。

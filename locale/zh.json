@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Claude Code 独立审核",
-    "description": "调用本地 Claude Code CLI 做只读独立审核，提供 claude_review / claude_review_disposition 工具和只读「协同」看板；需要 Claude Code CLI 鉴权与 PowerShell 7（pwsh）。"
+    "title": "Claude Code 独立审核 + 项目驾驶舱",
+    "description": "调用本地 Claude Code CLI 做只读独立审核（claude_review / claude_review_disposition 工具 + 会话内「协同」看板），并在左侧栏提供只读「项目」整页：到哪了、卡在哪、下一步做什么。需要 Claude Code CLI 鉴权与 PowerShell 7（pwsh）。"
   }
 }

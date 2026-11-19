@@ -16,3 +16,4 @@ Thumbs.db
 # Local scratch
 *.local
 *.log
+tools/preview/node_modules/

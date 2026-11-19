@@ -17,6 +17,10 @@ import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { appendDispositions, loadPanel, resolveTaskDir } from './panel.js'
+// 项目驾驶舱（原 @hunyed15/project-cockpit）已并入本包：读同一份审核账本，只读。
+import { createRoutes as createCockpitRoutes } from './lib/cockpit/route.js'
+import { readEvidence as readCockpitEvidence } from './lib/cockpit/reader.js'
+import { buildPanelModel as buildCockpitModel } from './lib/cockpit/panel.js'
 
 export const name = 'claude-code-review'
 // 这个版本的 cordis 只认字符串数组形式的 inject（对象形式会被解析成服务名 "required"/"optional"）。
@@ -622,8 +626,72 @@ export function apply(ctx, config = {}) {
         },
       }),
     )
+    // 项目驾驶舱走独立前缀；任何异常只影响它自己，不影响审核工具与上面的协同面板。
+    try {
+      registerCockpitRoute(scope, webServer)
+    } catch (error) {
+      logWarn(`项目面板路由注册失败（不影响 claude_review）：${String(error?.message ?? error)}`)
+    }
     return true
   }
+
+  const COCKPIT_ROUTE = '/project-cockpit'
+
+  const registerCockpitRoute = (scope, webServer) => {
+    const workspaceRegistry = () => {
+      try {
+        return ctx.get('workspaceRegistry')
+      } catch {
+        return undefined
+      }
+    }
+    const sameResolved = (a, b) => {
+      try {
+        const left = resolve(String(a))
+        const right = resolve(String(b))
+        return process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right
+      } catch {
+        return false
+      }
+    }
+    const toWorkspace = (item) => ({
+      id: String(item?.id ?? item?.path ?? ''),
+      title: String(item?.title ?? item?.path ?? ''),
+      path: String(item?.path ?? ''),
+    })
+    const routes = createCockpitRoutes({
+      listWorkspaces: async () => {
+        const service = workspaceRegistry()
+        if (!service || typeof service.list !== 'function') return []
+        const list = await service.list()
+        return list.map(toWorkspace).filter((item) => item.path !== '')
+      },
+      resolveWorkspace: async (path) => {
+        const service = workspaceRegistry()
+        if (!service) return null
+        if (typeof service.resolveByPath === 'function') {
+          const hit = await service.resolveByPath(String(path))
+          if (hit) return toWorkspace(hit)
+        }
+        if (typeof service.list === 'function') {
+          const all = await service.list()
+          const hit = all.find((item) => sameResolved(item?.path, path))
+          if (hit) return toWorkspace(hit)
+        }
+        return null
+      },
+      readProjectDir: (projectPath) => readCockpitEvidence(projectPath),
+      buildModel: (evidence) => buildCockpitModel(evidence),
+    })
+    scope.effect(() =>
+      webServer.register({
+        kind: 'prefix',
+        path: COCKPIT_ROUTE,
+        resource: (request) => routes.handle(request),
+      }),
+    )
+  }
+
   const panelAttempts = Number.isFinite(config.panelRetryAttempts) ? Math.max(1, Math.trunc(config.panelRetryAttempts)) : 10
   const panelRetryMs = Number.isFinite(config.panelRetryMs) ? Math.max(1, Math.trunc(config.panelRetryMs)) : 500
 

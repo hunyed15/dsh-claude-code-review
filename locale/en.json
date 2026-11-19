@@ -1,6 +1,6 @@
 {
   "meta": {
-    "title": "Claude Code review",
-    "description": "Independent read-only review with the local Claude Code CLI; adds the claude_review and claude_review_disposition tools plus a read-only collab review board. Requires Claude Code CLI authentication and PowerShell 7 (pwsh)."
+    "title": "Claude Code review + project cockpit",
+    "description": "Read-only independent review with the local Claude Code CLI (claude_review / claude_review_disposition tools plus an in-session collab board), and a read-only sidebar page that answers where the project stands, what blocks it, and the next step. Requires the Claude Code CLI with auth and PowerShell 7 (pwsh)."
   }
 }

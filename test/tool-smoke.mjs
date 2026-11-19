@@ -410,11 +410,15 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
 {
   const project = await makeTrellisProject('crc-panel-project-')
   let captured = null
+  const registeredPaths = []
   const agent = { id: 'session-panel' }
   const services = {
     webServer: {
       register(route) {
-        captured = route
+        registeredPaths.push(route.path)
+        // 现在同一次 apply 会注册两条前缀路由，测试只认审核面板那条；
+        // 驾驶舱路由另用 J0b 单独断言，避免"最后注册者获胜"掩盖问题。
+        if (route.path === '/claude-review/api') captured = route
         return () => {}
       },
     },
@@ -423,6 +427,11 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
   }
   makeCtx(cannedSpawn('{}', 0), {}, services)
   check('J0 注册了面板路由', captured !== null && captured.path === '/claude-review/api')
+  check(
+    'J0b 同时注册了项目驾驶舱路由',
+    registeredPaths.includes('/project-cockpit'),
+    registeredPaths.join(','),
+  )
 
   const call = async (query) => {
     const response = await captured.resource(new Request(`http://127.0.0.1/claude-review/api/panel${query}`))
@@ -451,7 +460,7 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
   const localServices = {
     webServer: {
       register(route) {
-        localCaptured = route
+        if (route.path === '/claude-review/api') localCaptured = route
         return () => {}
       },
     },
@@ -476,7 +485,7 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
   const project = await makeTrellisProject('crc-retry-project-')
   let captured = null
   let calls = 0
-  const webServer = { register(route) { captured = route; return () => {} } }
+  const webServer = { register(route) { if (route.path === '/claude-review/api') captured = route; return () => {} } }
   const agent = { id: 'session-panel' }
   const services = {
     agents: { get: (id) => (id === 'session-panel' ? agent : undefined), list: () => [agent] },
@@ -531,7 +540,7 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
 // K3. 生产路径：ctx.inject 存在时，由回调提供的 scope 完成注册
 {
   let captured = null
-  const webServer = { register(route) { captured = route; return () => {} } }
+  const webServer = { register(route) { if (route.path === '/claude-review/api') captured = route; return () => {} } }
   const agent = { id: 'session-panel' }
   const services = {
     agents: { get: (id) => (id === 'session-panel' ? agent : undefined), list: () => [agent] },
@@ -574,7 +583,7 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
 if (process.platform === 'win32') {
   const project = await makeTrellisProject('crc-case-project-')
   let captured = null
-  const webServer = { register(route) { captured = route; return () => {} } }
+  const webServer = { register(route) { if (route.path === '/claude-review/api') captured = route; return () => {} } }
   const agent = { id: 'session-panel' }
   const services = {
     agents: { get: (id) => (id === 'session-panel' ? agent : undefined), list: () => [agent] },
