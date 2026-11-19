@@ -414,6 +414,8 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
     const tools = makeCtx(cannedSpawn('{}', 0), {}, services)
     const tool = tools.get('project_status')
     check('P1 注册了 project_status 工具', Boolean(tool))
+    // DSH 要求工具声明 output { schema, render }，否则整个插件激活失败（v2.1.0 曾因此 404）
+    check('P1b 声明了 output.schema 与 render', typeof tool?.output?.schema === 'object' && typeof tool?.output?.render === 'function')
     const out = await tool.execute({}, exec('session-status'))
     check(
       'P2 返回 ok/blocking/text',

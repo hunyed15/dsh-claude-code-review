@@ -835,6 +835,26 @@ export function apply(ctx, config = {}) {
       },
       additionalProperties: false,
     },
+    output: {
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          text: { type: 'string' },
+          project: { type: 'string' },
+          blocking: { type: 'number' },
+          degraded: { type: 'boolean' },
+          nextAction: { type: 'string' },
+          gates: { type: 'array', items: { type: 'string' } },
+          issues: { type: 'array', items: { type: 'object', additionalProperties: true } },
+          warnings: { type: 'array', items: { type: 'string' } },
+        },
+        required: ['ok', 'text', 'blocking'],
+      },
+      render(_args, value) {
+        return [{ type: 'text', text: String(value?.text ?? '') }]
+      },
+    },
     async execute(args, exec) {
       const options = args ?? {}
       const cwd = agentCwd(ctx, exec, options.cwd)

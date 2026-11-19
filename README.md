@@ -56,7 +56,7 @@ git clone https://github.com/hunyed15/dsh-claude-code-review.git
 plugin_manager(action: "install_bundle", target: "D:\\path\\to\\dsh-claude-code-review")
 ```
 
-需要固定版本时在地址后加 tag 或提交：`git+https://github.com/hunyed15/dsh-claude-code-review.git#v2.0.0`；不写则跟随 `main` 最新提交。
+需要固定版本时在地址后加 tag 或提交：`git+https://github.com/hunyed15/dsh-claude-code-review.git#v2.1.1`；不写则跟随 `main` 最新提交。
 
 > git 安装时 npm 会克隆仓库并按 `files` 白名单打包，实测产出 17 个文件、86.1 kB，与 `npm pack` 产物完全一致（integrity 相同），所以装到 profile 的是插件本体，不含 `test/` 与开发产物。
 
@@ -80,7 +80,7 @@ plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claud
 
 ```powershell
 git push origin main
-git tag v2.0.0 && git push origin v2.0.0   # 可选：给用户一个可固定的版本点
+git tag v2.1.1 && git push origin v2.1.1   # 可选：给用户一个可固定的版本点
 npm pack --dry-run                          # 发布前确认 17 个文件、86.1 kB，引擎/acp/schema/role/locale/icon 都在
 ```
 
