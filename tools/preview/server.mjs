@@ -184,6 +184,25 @@ const server = createServer(async (req, res) => {
         model.truncated = true
         model.taskLimit = 200
       }
+      if (scenario === 'parallel') {
+        // 并行区：用真实纯函数 + 假会话记录，验证渲染与撞车预警
+        const sessions = await import(pathToFileURL(join(PKG, 'lib/cockpit/sessions.js')).href)
+        const now = Date.now()
+        const titles = new Map([
+          ['s1', '后端 · 订单接口'],
+          ['s2', '前端 · 订单页面'],
+          ['s3', '集成 · 合并与门禁'],
+        ])
+        const records = [
+          { header: { id: 's1', createdAt: now - 3600_000, cwd: PROJECT }, live: true, persisted: true },
+          { header: { id: 's2', createdAt: now - 1800_000, cwd: `${PROJECT}-web`, parentSession: 's1' }, live: true, persisted: true },
+          { header: { id: 's3', createdAt: now - 600_000, cwd: PROJECT }, live: true, persisted: true },
+          { header: { id: 's4', createdAt: now - 120_000, cwd: PROJECT }, live: false, persisted: true },
+        ]
+        const view = sessions.buildParallelView(records, { projectRoot: PROJECT, titles })
+        view.collisions = sessions.detectCollisions(view)
+        model.parallel = view
+      }
       if (scenario === 'blocking') {
         // 用真实报告形状（issues 在 review 下）走生产代码路径，而不是手改 totals：
         // 这样截图同时验证"issues 读对路径"和"卡在哪能给出内容"。

@@ -1,6 +1,6 @@
 {
   "name": "@hunyed15/claude-code-review",
-  "version": "2.1.1",
+  "version": "2.2.0",
   "description": "Independent read-only code review with the local Claude Code CLI, plus a project cockpit panel (where you are, what blocks you, the next step). Exposed as DSH tools with an in-app collab tab and a sidebar project page. Includes an internal ACP transport (auto-installed deps, no user ACP setup).",
   "license": "MIT",
   "author": "hunyed15",
@@ -23,7 +23,7 @@
   ],
   "type": "module",
   "scripts": {
-    "test": "node test/tool-smoke.mjs && node test/panel-smoke.mjs && node test/client-smoke.mjs && node test/acp-smoke.mjs && node --test test/cockpit-count.test.js test/cockpit-reader.test.js test/cockpit-gates.test.js test/cockpit-next-action.test.js test/cockpit-panel.test.js test/cockpit-route.test.js test/cockpit-client-smoke.test.js && pwsh -NoProfile -File test/engine-gate.ps1 && pwsh -NoProfile -File test/engine-cache.ps1 && pwsh -NoProfile -File test/engine-round-guard.ps1 && pwsh -NoProfile -File test/engine-acp.ps1"
+    "test": "node test/tool-smoke.mjs && node test/panel-smoke.mjs && node test/client-smoke.mjs && node test/acp-smoke.mjs && node --test test/cockpit-count.test.js test/cockpit-reader.test.js test/cockpit-gates.test.js test/cockpit-next-action.test.js test/cockpit-panel.test.js test/cockpit-route.test.js test/cockpit-sessions.test.js test/cockpit-client-smoke.test.js && pwsh -NoProfile -File test/engine-gate.ps1 && pwsh -NoProfile -File test/engine-cache.ps1 && pwsh -NoProfile -File test/engine-round-guard.ps1 && pwsh -NoProfile -File test/engine-acp.ps1"
   },
   "engines": {
     "dsh": ">=0.2.2-rc.3 <0.3.0"

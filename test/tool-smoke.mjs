@@ -506,6 +506,86 @@ const exec = (agentId) => ({ signal: undefined, agent: agentId ? { id: agentId }
   await rm(localProject, { recursive: true, force: true })
   await rm(project, { recursive: true, force: true })
 }
+// J5. 驾驶舱并行视图：sessionQuery + sessions → model.parallel（P1 只读）
+{
+  const project = await makeTrellisProject('crc-parallel-')
+  try {
+    let cockpitRoute = null
+    const services = {
+      webServer: {
+        register(route) {
+          if (route.path === '/project-cockpit') cockpitRoute = route
+          return () => {}
+        },
+      },
+      workspaceRegistry: {
+        list: async () => [{ id: 'w1', title: 'p', path: project }],
+        resolveByPath: async (value) =>
+          String(value).toLowerCase() === project.toLowerCase()
+            ? { id: 'w1', title: 'p', path: project }
+            : undefined,
+      },
+      sessionQuery: {
+        listSessions: async () => [
+          { header: { id: 's1', createdAt: 1000, cwd: project }, live: false, persisted: true },
+          { header: { id: 's2', createdAt: 2000, cwd: `${project}-wt`, parentSession: 's1' }, live: true, persisted: true },
+          { header: { id: 'other', createdAt: 3000, cwd: 'D:/Coding/elsewhere' }, live: true, persisted: true },
+        ],
+        readTitleSnapshots: async (ids) =>
+          ids.map((id) => ({
+            sessionId: id,
+            status: 'fulfilled',
+            value: { title: { title: id === 's1' ? '主线' : '并行任务' } },
+          })),
+      },
+      // 内存 store 才是"现在活着"的权威来源：s1 虽在查询里标 false，这里活着
+      sessions: { list: () => [{ id: 's1' }] },
+    }
+    makeCtx(cannedSpawn('{}', 0), {}, services)
+    check('J5a 注册了驾驶舱路由', Boolean(cockpitRoute))
+    const response = await cockpitRoute.resource(new Request('http://127.0.0.1/project-cockpit/api/panel'))
+    const body = await response.json()
+    check('J5b 面板带并行视图', body?.parallel && !body.parallel.unavailable, JSON.stringify(body?.parallel)?.slice(0, 140))
+    const rows = body?.parallel?.rows ?? []
+    check('J5c 只收录本项目会话', !rows.some((row) => row.id === 'other'), rows.map((r) => r.id).join(','))
+    check(
+      'J5d worktree 会话（cwd 在根外但父在根）被收录并标 offRoot',
+      rows.some((row) => row.id === 's2' && row.offRoot === true),
+    )
+    check('J5e 标题来自 readTitleSnapshots', rows.find((row) => row.id === 's1')?.title === '主线')
+    check('J5f live 以内存 store 为准', body?.parallel?.liveCount === 1, String(body?.parallel?.liveCount))
+    check('J5g 同目录并行不算撞车（两会话不同目录）', (body?.parallel?.collisions ?? []).length === 0)
+  } finally {
+    await rm(project, { recursive: true, force: true })
+  }
+}
+
+// J6. 没有 sessionQuery 时并行区如实降级，不影响面板其余部分
+{
+  const project = await makeTrellisProject('crc-parallel-none-')
+  try {
+    let cockpitRoute = null
+    makeCtx(cannedSpawn('{}', 0), {}, {
+      webServer: {
+        register(route) {
+          if (route.path === '/project-cockpit') cockpitRoute = route
+          return () => {}
+        },
+      },
+      workspaceRegistry: {
+        list: async () => [{ id: 'w1', title: 'p', path: project }],
+        resolveByPath: async () => ({ id: 'w1', title: 'p', path: project }),
+      },
+    })
+    const response = await cockpitRoute.resource(new Request('http://127.0.0.1/project-cockpit/api/panel'))
+    const body = await response.json()
+    check('J6a 缺 sessionQuery 时给出可读原因', typeof body?.parallel?.unavailable === 'string', JSON.stringify(body?.parallel))
+    check('J6b 其余面板数据照常返回', Array.isArray(body?.gates) && body.gates.length === 7)
+  } finally {
+    await rm(project, { recursive: true, force: true })
+  }
+}
+
 // K. 冷启动竞态：webServer 晚到，靠有限重试补上（不依赖任何动态注入 API）
 {
   const project = await makeTrellisProject('crc-retry-project-')

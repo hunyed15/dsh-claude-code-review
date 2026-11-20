@@ -34,6 +34,25 @@ DSH Host 插件：把「本地 Claude Code 做独立只读审核」注册成原�
 
 **两个顺手能用的小东西**：`复制摘要` 把当前状态生成 Markdown（卡点数、阶段门进度、下一步、待修清单），贴进站会/周报；有未处置阻塞时，全局提醒会浮一条「还有 N 条未处置阻塞 · 去看」，同一项目每小时最多一次（存在 localStorage，隐私模式下可能重复）。
 
+### 并行（谁在干）
+
+单线开发时三个问题够用；一旦多个 agent 并行，还需要知道**谁在干、会不会撞**。面板的「并行」区给出：
+
+| 列 | 来源 |
+|---|---|
+| 会话（标题 / 子代理层级） | `sessionQuery.readTitleSnapshots` + `header.origin/delegationDepth` |
+| 目录（主工作区 or 其他目录） | `SessionHeader.cwd` 与项目根比对 |
+| 状态（运行中 / 已停止） | `ctx.sessions.list()`（内存态最权威） |
+| 创建于 | `SessionHeader.createdAt` |
+
+以及一条**撞车预警**：两个"运行中"的会话落在同一个目录，很可能互相覆盖，横幅直接点名。
+
+范围与边界（如实标注）：
+- 只列**本项目**的会话：`cwd` 在项目根下，或其父会话在项目根下（worktree 会话属于后者）。
+- worktree 只从 `cwd` 反推，**不跑 git**，所以界面说"其他目录"而不是"worktree"。
+- 缺 `sessionQuery` 的 profile 会在该区显示原因，面板其余部分不受影响。
+- 写作用域级别的冲突（两个会话改同一文件但目录不同）要等任务板接入，属于 P2。
+
 **数据来源**：`.trellis/tasks/*/task.json`、每个任务自己的 `review/history.jsonl`、`review-N.json`、`dispositions.jsonl`；无 `.trellis` 时回落 `.dsh/claude-review/ledger/review/`。bug 计数口径与「协同」面板一致（`failOn` 取报告 `meta.failOn`，缺失回退 `critical/important`；处置必须轮次匹配）。
 
 **权限边界**：面板是 root scope，拿不到会话；项目来自 `workspaceRegistry` 里登记过的路径，其余 403。路由只读（`GET`），只监听 `127.0.0.1`。
@@ -56,7 +75,7 @@ git clone https://github.com/hunyed15/dsh-claude-code-review.git
 plugin_manager(action: "install_bundle", target: "D:\\path\\to\\dsh-claude-code-review")
 ```
 
-需要固定版本时在地址后加 tag 或提交：`git+https://github.com/hunyed15/dsh-claude-code-review.git#v2.1.1`；不写则跟随 `main` 最新提交。
+需要固定版本时在地址后加 tag 或提交：`git+https://github.com/hunyed15/dsh-claude-code-review.git#v2.2.0`；不写则跟随 `main` 最新提交。
 
 > git 安装时 npm 会克隆仓库并按 `files` 白名单打包，实测产出 17 个文件、86.1 kB，与 `npm pack` 产物完全一致（integrity 相同），所以装到 profile 的是插件本体，不含 `test/` 与开发产物。
 
@@ -80,7 +99,7 @@ plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claud
 
 ```powershell
 git push origin main
-git tag v2.1.1 && git push origin v2.1.1   # 可选：给用户一个可固定的版本点
+git tag v2.2.0 && git push origin v2.2.0   # 可选：给用户一个可固定的版本点
 npm pack --dry-run                          # 发布前确认 17 个文件、86.1 kB，引擎/acp/schema/role/locale/icon 都在
 ```
 
@@ -307,11 +326,11 @@ pwsh -NoProfile -File test/engine-gate.ps1   # 55 个断言：gate 快照/历史
 pwsh -NoProfile -File test/engine-cache.ps1  # 8 个断言：fake Claude 验证缓存、空 diff 清 hash、gate 可解锁
 pwsh -NoProfile -File test/engine-round-guard.ps1 # 22 个断言：V2 未处置 blocking 拒绝新 review、fixed/deferred/反证放行、跨轮/原始下标/gate/range、报告 failOn、nothing 保留 lastReport、旧报告回退默认 failOn
 pwsh -NoProfile -File test/engine-acp.ps1    # 10 个断言：fake ACP full/gate、空格路径、auto→CLI、超时/启动超时回退
-node test/tool-smoke.mjs                     # 66 个断言，约 10 秒
+node test/tool-smoke.mjs                     # 76 个断言，约 10 秒
 node test/panel-smoke.mjs                    # 105 个断言（真实仓库断言可选，见下）
 node test/client-smoke.mjs                   # 18 个断言
 node test/acp-smoke.mjs                      # 13 个断言：role/budget extraArgs、只读权限、fs、真实 adapter 启动失败
-node --test test/cockpit-*.test.js           # 118 个断言：驾驶舱计数口径、读取器、阶段门、下一步、模型、路由、客户端
+node --test test/cockpit-*.test.js           # 130 个断言：驾驶舱计数口径、读取器、阶段门、下一步、模型、路由、客户端
 ```
 
 也可以直接 `npm test`（按上面顺序串行跑；**不要用 `node --test` 跑全部**——它会并发跑那些要 spawn 子进程的 smoke 套件并卡住）。

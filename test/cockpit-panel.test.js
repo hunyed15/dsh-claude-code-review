@@ -163,6 +163,20 @@ test('截断只压列表，卡点数与阶段门仍按全部任务算', () => {
   assert.equal(model.totals.rounds, 260)
 })
 
+test('parallel 由 Host 注入并原样透传', () => {
+  const model = buildPanelModel(
+    evidence({ parallel: { total: 2, liveCount: 1, rows: [], collisions: [] } }),
+  )
+  assert.equal(model.parallel.total, 2)
+  assert.equal(model.parallel.liveCount, 1)
+})
+
+test('没有 parallel 时为 null，不影响其余字段', () => {
+  const model = buildPanelModel(evidence())
+  assert.equal(model.parallel, null)
+  assert.equal(model.gates.length, 7)
+})
+
 test('totals.taskCount 是全量任务数，不是截断后的长度', () => {
   const many = Array.from({ length: 260 }, (_, index) => task(`t${index}`))
   const model = buildPanelModel(evidence({ tasks: many }))

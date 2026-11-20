@@ -1274,6 +1274,11 @@ window.__ModuleLoader__.load({
       }
     }
 
+    const baseName = (value) => {
+      const parts = String(value ?? '').split(/[\\/]/).filter(Boolean)
+      return parts.length > 0 ? parts[parts.length - 1] : String(value ?? '')
+    }
+
     // 指令里混着中英文标识符（claude_review(mode:"gate")）。不区分字体会让人读串行、
     // 抄错命令，所以把反引号段渲染成等宽。
     function renderInstruction(text) {
@@ -1829,6 +1834,7 @@ h2.pc-card-title { margin:0 0 10px; font-size:12px; font-weight:600; color:var(-
       }, [])
       const style = null
       const totals = model && model.totals ? model.totals : null
+      const parallel = model && model.parallel ? model.parallel : null
       const blocking = totals ? totals.blocking : 0
       // 服务端少字段时不要落到 ErrorBoundary 白板：逐项兜底，页面还能显示"数据不完整"。
       const gates = model && Array.isArray(model.gates) ? model.gates : []
@@ -2082,6 +2088,90 @@ h2.pc-card-title { margin:0 0 10px; font-size:12px; font-weight:600; color:var(-
               `trellis ${trellis.version || '未知'} · spec ${trellis.specFiles} 个文件 · ${taskCount} 个任务`,
             ),
           ),
+          parallel && !parallel.unavailable
+            ? h(
+                'section',
+                { className: 'pc-card' },
+                h(
+                  'h2',
+                  { className: 'pc-card-title' },
+                  `并行 · ${parallel.liveCount} 个在跑 / 共 ${parallel.total} 个会话`,
+                ),
+                parallel.collisions && parallel.collisions.length > 0
+                  ? h(
+                      'div',
+                      { className: 'pc-banner pc-banner-inline', role: 'status' },
+                      h(
+                        'span',
+                        null,
+                        `${parallel.collisions.length} 处同目录并行，可能互相覆盖：` +
+                          parallel.collisions
+                            .map((item) =>
+                              samePath(item.dir, parallel.projectRoot) ? '主工作区' : baseName(item.dir),
+                            )
+                            .join('、'),
+                      ),
+                    )
+                  : null,
+                h(
+                  'div',
+                  { className: 'pc-table-wrap' },
+                  h(
+                    'table',
+                    { className: 'pc-table' },
+                    h('caption', { className: 'pc-sr' }, '项目内会话与并行状态'),
+                    h(
+                      'thead',
+                      null,
+                      h(
+                        'tr',
+                        null,
+                        h('th', { scope: 'col' }, '会话'),
+                        h('th', { scope: 'col' }, '目录'),
+                        h('th', { scope: 'col' }, '状态'),
+                        h('th', { scope: 'col', className: 'pc-col-secondary' }, '创建于'),
+                      ),
+                    ),
+                    h(
+                      'tbody',
+                      null,
+                      parallel.rows.map((row) =>
+                        h(
+                          'tr',
+                          { key: row.id },
+                          h(
+                            'th',
+                            { scope: 'row', className: 'pc-row-head' },
+                            row.title || row.shortId,
+                            row.origin === 'subagent'
+                              ? h(
+                                  'span',
+                                  { className: 'pc-issue-meta' },
+                                  `子代理${row.delegationDepth ? ` L${row.delegationDepth}` : ''}`,
+                                )
+                              : null,
+                          ),
+                          h('td', { title: row.cwd }, row.offRoot ? baseName(row.cwd) : '主工作区'),
+                          h('td', null, row.live ? '运行中' : '已停止'),
+                          h('td', { className: 'pc-col-secondary' }, formatTime(row.createdAt)),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                parallel.truncated
+                  ? h('div', { className: 'pc-muted pc-meta' }, `只列出最近 ${parallel.rows.length} 个会话`)
+                  : null,
+              )
+            : null,
+          parallel && parallel.unavailable
+            ? h(
+                'section',
+                { className: 'pc-card' },
+                h('h2', { className: 'pc-card-title' }, '并行'),
+                h('div', { className: 'pc-muted' }, parallel.unavailable),
+              )
+            : null,
           h(
             'section',
             { className: 'pc-card' },

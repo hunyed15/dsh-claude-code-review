@@ -350,6 +350,15 @@ test('可以复制 Markdown 摘要（站会/周报用）', async () => {
   assert.ok(source.includes('阶段门：'), '摘要要含阶段门进度')
 })
 
+test('并行区：会话 / 目录 / 状态 / 创建时间，缺服务时如实降级', async () => {
+  const source = await read('client.js')
+  assert.ok(source.includes('const parallel = model && model.parallel ? model.parallel : null'))
+  assert.ok(source.includes('个在跑 / 共'), '标题要给出在跑与总数')
+  assert.ok(source.includes('主工作区'), 'cwd 等于项目根时标主工作区')
+  assert.ok(source.includes('同目录并行'), '要有撞车预警文案')
+  assert.ok(source.includes('parallel.unavailable'), '读不到会话服务时要说明原因')
+})
+
 test('nextAction 缺字段时逐项兜底，不落到 ErrorBoundary', async () => {
   const source = await read('client.js')
   assert.ok(source.includes('const action ='), '需要兜底对象')

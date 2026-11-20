@@ -21,6 +21,7 @@ import { appendDispositions, loadPanel, resolveTaskDir } from './panel.js'
 import { createRoutes as createCockpitRoutes } from './lib/cockpit/route.js'
 import { readEvidence as readCockpitEvidence } from './lib/cockpit/reader.js'
 import { buildPanelModel as buildCockpitModel } from './lib/cockpit/panel.js'
+import { buildParallelView, detectCollisions } from './lib/cockpit/sessions.js'
 
 export const name = 'claude-code-review'
 // 这个版本的 cordis 只认字符串数组形式的 inject（对象形式会被解析成服务名 "required"/"optional"）。
@@ -659,6 +660,57 @@ export function apply(ctx, config = {}) {
       title: String(item?.title ?? item?.path ?? ''),
       path: String(item?.path ?? ''),
     })
+    // 并行视图：有哪些会话、谁还活着、在哪个目录。全部只读，缺服务时如实降级。
+    const serviceOr = (name) => {
+      try {
+        return ctx.get(name)
+      } catch {
+        return undefined
+      }
+    }
+    const readParallel = async (projectRoot) => {
+      const query = serviceOr('sessionQuery')
+      if (!query || typeof query.listSessions !== 'function') {
+        return { unavailable: '这个 profile 没有会话查询服务（sessionQuery），看不到会话列表' }
+      }
+      let records
+      try {
+        records = await query.listSessions()
+      } catch (error) {
+        return { unavailable: `会话列表读取失败：${String(error?.message ?? error)}` }
+      }
+      // 先算归属，再只给本项目的会话批量取标题（节省往返）
+      const base = buildParallelView(records, { projectRoot })
+      const titles = new Map()
+      const ids = base.rows.map((row) => row.id)
+      if (ids.length > 0 && typeof query.readTitleSnapshots === 'function') {
+        try {
+          const results = await query.readTitleSnapshots(ids)
+          for (const result of Array.isArray(results) ? results : []) {
+            const title = result?.value?.title?.title
+            if (result?.status === 'fulfilled' && typeof title === 'string') {
+              titles.set(String(result.sessionId), title)
+            }
+          }
+        } catch {
+          // 标题是装饰信息，取不到不影响并行视图
+        }
+      }
+      const view = buildParallelView(records, { projectRoot, titles })
+      // 内存 store 是"现在活着"的更权威来源
+      const store = serviceOr('sessions')
+      if (store && typeof store.list === 'function') {
+        try {
+          const liveIds = new Set(store.list().map((session) => String(session?.id)))
+          for (const row of view.rows) row.live = liveIds.has(row.id)
+          view.liveCount = view.rows.filter((row) => row.live).length
+        } catch {
+          // 读不到就沿用查询记录里的 live
+        }
+      }
+      view.collisions = detectCollisions(view)
+      return view
+    }
     const routes = createCockpitRoutes({
       listWorkspaces: async () => {
         const service = workspaceRegistry()
@@ -680,7 +732,15 @@ export function apply(ctx, config = {}) {
         }
         return null
       },
-      readProjectDir: (projectPath) => readCockpitEvidence(projectPath),
+      readProjectDir: async (projectPath) => {
+        const evidence = await readCockpitEvidence(projectPath)
+        try {
+          evidence.parallel = await readParallel(projectPath)
+        } catch (error) {
+          evidence.parallel = { unavailable: String(error?.message ?? error) }
+        }
+        return evidence
+      },
       buildModel: (evidence) => buildCockpitModel(evidence),
     })
     scope.effect(() =>
