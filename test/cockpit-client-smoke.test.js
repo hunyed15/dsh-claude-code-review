@@ -7,7 +7,7 @@ const read = (path) => readFile(new URL(`../${path}`, import.meta.url), 'utf8')
 test('client.js 用宿主的模块加载器注册，id 是本包名（驾驶舱已并入库内）', async () => {
   const source = await read('client.js')
   assert.match(source, /window\.__ModuleLoader__\.load\(/)
-  assert.match(source, /id: '@hunyed15\/claude-code-review'/)
+  assert.match(source, /id: '@hunyed15\/project-cockpit'/)
   assert.ok(source.includes('const PANEL_ID = '), '驾驶舱面板 id 仍要保留为常量')
 })
 

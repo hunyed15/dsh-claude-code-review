@@ -1,6 +1,6 @@
 - insert:
     - id: claude-code-review
-      name: '@hunyed15/claude-code-review'
+      name: '@hunyed15/project-cockpit'
       config:
         # 审核引擎：留空自动探测 <cwd>/tools/claude-review/Invoke-ClaudeReview.ps1，
         # 找不到时使用插件自带的 scripts/Invoke-ClaudeReview.ps1

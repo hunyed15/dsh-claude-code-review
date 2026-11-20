@@ -1,6 +1,6 @@
-# @hunyed15/claude-code-review
+# @hunyed15/project-cockpit
 
-> 源码：<https://github.com/hunyed15/dsh-claude-code-review>
+> 源码：<https://github.com/hunyed15/dsh-project-cockpit>
 
 DSH Host 插件：把「本地 Claude Code 做独立只读审核」注册成原生工具 **`claude_review`**。
 
@@ -16,7 +16,8 @@ DSH Host 插件：把「本地 Claude Code 做独立只读审核」注册成原�
   - 全局提醒（`shell.overlay`）：还有未处置阻塞时浮一条「去看」，同一项目每小时最多一次。
 - **不是**：不替换任何现有 UI，也不写项目文件——两个面板都只读。
 - 审核引擎仍是 `Invoke-ClaudeReview.ps1`（快照增量、diff 范围、提示词、报告、门禁、退出码全在里面）。插件只做路径解析、进程调度与结果归一化，**避免两套逻辑漂移**。
-- **2.0.0 起，原先独立的 `@hunyed15/project-cockpit` 已并入本包**：只装这一个插件即可，不要再去单独安装驾驶舱（两者同时存在会抢同一个面板 id `project-cockpit`）。
+- **3.0.0 起改名为 `@hunyed15/project-cockpit`**（原名 `@hunyed15/claude-code-review`）。原因很简单：它已经不是"审核插件"了，审核是它的**一个数据源**。原先独立的驾驶舱包（`hunyed15/project-cockpit` 仓库）已并入本包并归档——只装这一个，不要再去单独安装驾驶舱。
+- **定位是集成层**：读 trellis 任务、审核账本、会话状态，归一成四类事实（功能 / 缺陷 / 阶段门 / 并行会话），投射成一屏现场并给出唯一动作。**它不生产业务数据，也不另存状态**。设计见 [设计 v2](docs/specs/2026-11-20-cockpit-design-v2.md)。
 
 ## 项目驾驶舱（左侧栏「项目」）
 
@@ -59,25 +60,25 @@ DSH Host 插件：把「本地 Claude Code 做独立只读审核」注册成原�
 
 ## 安装
 
-本插件**只通过 GitHub 分发**（没有发布到 npm）。包名 `@hunyed15/claude-code-review`，仓库 <https://github.com/hunyed15/dsh-claude-code-review>。
+本插件**只通过 GitHub 分发**（没有发布到 npm）。包名 `@hunyed15/project-cockpit`，仓库 <https://github.com/hunyed15/dsh-project-cockpit>。
 
 ### 从 GitHub 安装（用户）
 
 ```powershell
-plugin_manager(action: "install_bundle", target: "git+https://github.com/hunyed15/dsh-claude-code-review.git")
+plugin_manager(action: "install_bundle", target: "git+https://github.com/hunyed15/dsh-project-cockpit.git")
 ```
 
 等价的手动方式：
 
 ```powershell
-git clone https://github.com/hunyed15/dsh-claude-code-review.git
+git clone https://github.com/hunyed15/dsh-project-cockpit.git
 # 然后 Plugins → Add plugin 选该目录，或
-plugin_manager(action: "install_bundle", target: "D:\\path\\to\\dsh-claude-code-review")
+plugin_manager(action: "install_bundle", target: "D:\\path\\to\\dsh-project-cockpit")
 ```
 
-需要固定版本时在地址后加 tag 或提交：`git+https://github.com/hunyed15/dsh-claude-code-review.git#v2.2.0`；不写则跟随 `main` 最新提交。
+需要固定版本时在地址后加 tag 或提交：`git+https://github.com/hunyed15/dsh-project-cockpit.git#v3.0.0`；不写则跟随 `main` 最新提交。
 
-> git 安装时 npm 会克隆仓库并按 `files` 白名单打包，实测产出 17 个文件、86.1 kB，与 `npm pack` 产物完全一致（integrity 相同），所以装到 profile 的是插件本体，不含 `test/` 与开发产物。
+> git 安装时 npm 会克隆仓库并按 `files` 白名单打包，所以进 profile 的是插件本体，不含 `test/`、`tools/` 与开发产物。
 
 需要本机 **Claude Code CLI + 鉴权**，以及 **PowerShell 7（`pwsh`）**；Windows 已验证。首次安装会拉 ACP adapter 依赖；**不需要**单独安装/配置 ACP。
 
@@ -87,7 +88,7 @@ plugin_manager(action: "install_bundle", target: "D:\\path\\to\\dsh-claude-code-
 plugin_manager(action: "install_bundle", target: "D:\\Coding\\dsh-plugins\\claude-code-review")
 ```
 
-> 同名包已安装时 `install_bundle` 会报 `already-installed`：先 `remove_bundle(...)` 再安装。注意**链接安装的 bundle 名是 `@local/<目录名>`**（本机实测为 `@local/claude-code-review`，插件行 `moduleName` 才是 `@hunyed15/claude-code-review`）；从链接安装切到 git 安装前要先 `remove_bundle("@local/claude-code-review")`，否则两个 bundle 会抢同一个插件行 id。插件目录搬家后不重链，profile 的 `node_modules` 链接会悬空，重启 DSH 后插件不再加载。
+> 同名包已安装时 `install_bundle` 会报 `already-installed`：先 `remove_bundle(...)` 再安装。注意**链接安装的 bundle 名是 `@local/<目录名>`**（本机实测为 `@local/claude-code-review`，插件行 `moduleName` 才是 `@hunyed15/project-cockpit`）；从链接安装切到 git 安装前要先 `remove_bundle("@local/claude-code-review")`，否则两个 bundle 会抢同一个插件行 id。插件目录搬家后不重链，profile 的 `node_modules` 链接会悬空，重启 DSH 后插件不再加载。
 
 安装后当前 profile 立即生效（bundle 通过 HMR 激活），可用 `cordis_inspect_query(platform:"host", provider:"Tool", method:"listTools")` 确认 `claude_review` 出现。
 
@@ -205,7 +206,7 @@ npm pack --dry-run                          # 发布前确认 17 个文件、86.
 - ACP adapter 仍复用现有 Claude Code（`CLAUDE_CODE_EXECUTABLE` 指向引擎解析到的 `claude`），因此 **Claude Code 及其鉴权/模型/relay 仍是插件前置**；这不是 ACP 配置。
 - **成本**：当前 ACP adapter 不提供逐轮 `total_cost_usd`，报告里 `cost_usd=null`、工具 `costKnown=false`，面板不显示假的 `$0`。需要精确成本时用 `transport: cli`。
 - ACP 通过 `session/new` 的 `_meta.claudeCode.options.extraArgs` 透传 `maxBudgetUsd`/`model`/`effort`；未配置时用 Claude settings。需要强制 CLI 用 `transport: cli`。
-- **发布**：只走 GitHub；包名 `@hunyed15/claude-code-review`、已去掉 `private`，安装地址见「发布（维护者）」。依赖会随插件安装自动带上，最终用户仍然只装插件，不需要额外 ACP 安装/配置。
+- **发布**：只走 GitHub；包名 `@hunyed15/project-cockpit`、已去掉 `private`，安装地址见「发布（维护者）」。依赖会随插件安装自动带上，最终用户仍然只装插件，不需要额外 ACP 安装/配置。
 
 ## 提交前门禁与 pre-commit
 

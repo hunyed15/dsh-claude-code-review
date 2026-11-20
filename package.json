@@ -1,16 +1,16 @@
 {
-  "name": "@hunyed15/claude-code-review",
-  "version": "2.2.0",
-  "description": "Independent read-only code review with the local Claude Code CLI, plus a project cockpit panel (where you are, what blocks you, the next step). Exposed as DSH tools with an in-app collab tab and a sidebar project page. Includes an internal ACP transport (auto-installed deps, no user ACP setup).",
+  "name": "@hunyed15/project-cockpit",
+  "version": "3.0.0",
+  "description": "Project cockpit for DeepSeek Harness: one read-only page that answers where the project stands, what blocks it, who is working in parallel, and the next step. Wires existing sources (trellis tasks, review ledger, sessions) instead of inventing new state; the independent Claude Code review engine ships inside and is one of those sources.",
   "license": "MIT",
   "author": "hunyed15",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hunyed15/dsh-claude-code-review.git"
+    "url": "git+https://github.com/hunyed15/dsh-project-cockpit.git"
   },
-  "homepage": "https://github.com/hunyed15/dsh-claude-code-review#readme",
+  "homepage": "https://github.com/hunyed15/dsh-project-cockpit#readme",
   "bugs": {
-    "url": "https://github.com/hunyed15/dsh-claude-code-review/issues"
+    "url": "https://github.com/hunyed15/dsh-project-cockpit/issues"
   },
   "keywords": [
     "dsh",
@@ -61,11 +61,15 @@
     "@agentclientprotocol/sdk": "^2.6.0"
   },
   "dsh": {
-    "bundle": { "patch": "./cordis.patch.yml" },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
     "client": {
       "platform": "web",
       "immediately": true,
-      "inject": ["@deepseek-ai/dsh-client-ui-conversation"]
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     }
   }
 }
